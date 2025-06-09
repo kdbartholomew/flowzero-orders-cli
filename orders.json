@@ -59,5 +59,44 @@
     "start_date": "N/A",
     "end_date": "N/A",
     "timestamp": "2025-03-24T12:50:49.647037"
+  },
+  {
+    "order_id": "156c7297-b45d-474e-bc1a-6d6b5461f35c",
+    "aoi_name": "Virtual_gage_DrySpy_20241030_Cosumnes_Badger",
+    "order_type": "PSScope",
+    "start_date": "2024-10-01",
+    "end_date": "2024-12-31",
+    "num_bands": "four_bands",
+    "timestamp": "2025-04-07T12:54:02.945931"
+  },
+  {
+    "order_id": "c22b5b2b-1981-4b17-aed0-d5de79b5a583",
+    "aoi_name": "Virtual_gage_DrySpy_20241030_Cosumnes_Badger",
+    "order_type": "PSScope",
+    "start_date": "2021-01-01",
+    "end_date": "2021-12-31",
+    "num_bands": "four_bands",
+    "product_bundle": "analytic_udm2",
+    "timestamp": "2025-04-07T13:38:00.745609"
+  },
+  {
+    "order_id": "db189253-0966-404f-92a5-b54f5820ba9f",
+    "aoi_name": "Virtual_gage_DrySpy_20241030_Cosumnes_Badger",
+    "order_type": "PSScope",
+    "start_date": "2021-01-01",
+    "end_date": "2021-12-31",
+    "num_bands": "four_bands",
+    "product_bundle": "analytic_sr_udm2",
+    "timestamp": "2025-04-07T14:21:14.994488"
+  },
+  {
+    "order_id": "c7598631-bc5e-4c2c-bcdb-d1acf1c13d50",
+    "aoi_name": "Virtual_gage_DrySpy_20241030_Cosumnes_Badger",
+    "order_type": "PSScope",
+    "start_date": "2021-01-01",
+    "end_date": "2021-03-31",
+    "num_bands": "four_bands",
+    "product_bundle": "visual",
+    "timestamp": "2025-04-07T14:28:59.901245"
   }
 ]
