@@ -6,7 +6,9 @@ import io
 import mimetypes
 from pathlib import Path
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 from collections import defaultdict
+from typing import List, Tuple
 
 import click
 import requests
@@ -83,6 +85,176 @@ def get_week_start_date(date_str):
         return date_str
     sunday = date_obj - timedelta(days=days_to_sunday)
     return sunday.strftime('%Y_%m_%d')
+
+
+def subdivide_date_range(start_date: str, end_date: str, max_months: int = 9) -> List[Tuple[str, str]]:
+    """
+    Subdivide a date range into chunks of max_months or less.
+    
+    Args:
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        max_months: Maximum number of months per chunk (default 9)
+    
+    Returns:
+        List of (start_date, end_date) tuples for each chunk
+    """
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    
+    chunks = []
+    current_start = start_dt
+    
+    while current_start <= end_dt:
+        # Calculate chunk end: either max_months from start or the overall end date
+        chunk_end = current_start + relativedelta(months=max_months) - timedelta(days=1)
+        if chunk_end > end_dt:
+            chunk_end = end_dt
+        
+        chunks.append((
+            current_start.strftime("%Y-%m-%d"),
+            chunk_end.strftime("%Y-%m-%d")
+        ))
+        
+        # Move to next chunk
+        current_start = chunk_end + timedelta(days=1)
+    
+    return chunks
+
+
+def submit_single_order(
+    aoi_geom,
+    aoi_geojson: dict,
+    aoi_area_sqkm: float,
+    start_date: str,
+    end_date: str,
+    gage_id: str,
+    num_bands: str,
+    product_bundle: str,
+    cadence: str,
+    api_key: str,
+    dry_run: bool = False
+) -> dict:
+    """
+    Submit a single order to Planet API.
+    
+    Returns dict with order info or error details.
+    """
+    start_date_iso = f"{start_date}T00:00:00Z"
+    end_date_iso = f"{end_date}T23:59:59Z"
+    
+    # Perform scene search
+    search_url = "https://api.planet.com/data/v1/quick-search"
+    search_payload = {
+        "item_types": ["PSScene"],
+        "filter": {
+            "type": "AndFilter",
+            "config": [
+                {"type": "GeometryFilter", "field_name": "geometry", "config": aoi_geojson},
+                {"type": "DateRangeFilter", "field_name": "acquired", "config": {"gte": start_date_iso, "lte": end_date_iso}},
+                {"type": "RangeFilter", "field_name": "cloud_cover", "config": {"lte": 0.0}}
+            ]
+        }
+    }
+    
+    search_headers = {"Content-Type": "application/json"}
+    search_response = requests.post(search_url, json=search_payload, auth=(api_key, ""), headers=search_headers)
+    
+    if search_response.status_code != 200:
+        return {"success": False, "error": f"Search failed: {search_response.text}"}
+    
+    features = search_response.json().get("features", [])
+    if not features:
+        return {"success": False, "error": "No cloud-free scenes found", "scenes_found": 0}
+    
+    def get_interval_key(date_obj):
+        if cadence == "daily":
+            return date_obj.strftime("%Y-%m-%d")
+        elif cadence == "weekly":
+            sunday = date_obj - timedelta(days=date_obj.weekday() + 1 if date_obj.weekday() != 6 else 0)
+            return sunday.strftime("%Y-%m-%d")
+        elif cadence == "monthly":
+            return date_obj.strftime("%Y-%m")
+    
+    scene_groups = defaultdict(list)
+    
+    for feature in features:
+        props = feature["properties"]
+        geom = shape(feature["geometry"])
+        intersect_area = geom.intersection(aoi_geom).area
+        coverage_pct = (intersect_area / aoi_geom.area) * 100
+        if coverage_pct < 99:
+            continue
+        
+        date_str = props["acquired"][:10]
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+        key = get_interval_key(date_obj)
+        scene_groups[key].append((coverage_pct, feature))
+    
+    selected = []
+    for key in sorted(scene_groups):
+        best = sorted(scene_groups[key], key=lambda x: -x[0])[0]
+        selected.append(best[1])
+    
+    if not selected:
+        return {"success": False, "error": "No full-coverage scenes matched filter", "scenes_found": len(features)}
+    
+    item_ids = [f["id"] for f in selected]
+    
+    if dry_run:
+        return {
+            "success": True,
+            "dry_run": True,
+            "gage_id": gage_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "scenes_found": len(features),
+            "scenes_selected": len(selected),
+            "item_ids": item_ids
+        }
+    
+    # Submit order
+    order_url = "https://api.planet.com/compute/ops/orders/v2"
+    order_payload = {
+        "name": f"PSScope Order {gage_id} {start_date} to {end_date}",
+        "products": [{
+            "item_ids": item_ids,
+            "item_type": "PSScene",
+            "product_bundle": product_bundle
+        }],
+        "tools": [
+            {"clip": {"aoi": aoi_geojson}}
+        ]
+    }
+    
+    response = requests.post(order_url, json=order_payload, auth=(api_key, ""), headers=search_headers)
+    
+    if response.status_code == 202:
+        order_id = response.json()["id"]
+        log_order({
+            "order_id": order_id,
+            "aoi_name": gage_id,
+            "order_type": "PSScope",
+            "start_date": start_date,
+            "end_date": end_date,
+            "num_bands": num_bands,
+            "product_bundle": product_bundle,
+            "clipped": True,
+            "aoi_area_sqkm": aoi_area_sqkm,
+            "scenes_selected": len(selected),
+            "batch_order": True,
+            "timestamp": datetime.now().isoformat()
+        })
+        return {
+            "success": True,
+            "order_id": order_id,
+            "gage_id": gage_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "scenes_selected": len(selected)
+        }
+    else:
+        return {"success": False, "error": f"Order failed: {response.status_code} - {response.text[:200]}"}
 
 # --- CLI Commands ---
 
@@ -512,6 +684,193 @@ def search_scenes(geojson, start_date, end_date, cadence, api_key):
     ids = ",".join([f["id"] for f in selected])
     console.print(f"\nUse this to order: [bold blue]--scene-ids {ids}[/bold blue]")
 
+
+@cli.command()
+@click.option("--shp", required=True, type=click.Path(exists=True), help="Path to input Shapefile with AOIs and attributes")
+@click.option("--gage-id-col", default="gage_id", help="Column name for gage ID (default: gage_id)")
+@click.option("--start-date-col", default="start_date", help="Column name for start date (default: start_date)")
+@click.option("--end-date-col", default="end_date", help="Column name for end date (default: end_date)")
+@click.option("--num-bands", type=click.Choice(['four_bands', 'eight_bands']), default='four_bands', help="Choose 4B or 8B imagery")
+@click.option("--api-key", default=os.getenv("PL_API_KEY"), help="Planet API Key")
+@click.option("--bundle", default=None, help="Override bundle name to use")
+@click.option("--cadence", type=click.Choice(["daily", "weekly", "monthly"]), default="weekly", help="Scene selection cadence")
+@click.option("--max-months", default=9, type=int, help="Maximum months per order chunk (default: 9)")
+@click.option("--dry-run", is_flag=True, help="Preview orders without submitting")
+def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_key, bundle, cadence, max_months, dry_run):
+    """
+    Submit multiple PlanetScope orders from a shapefile.
+    
+    The shapefile should contain:
+    - Geometry: AOI polygons for each gage
+    - gage_id column: Unique identifier for each gage
+    - start_date column: Start date (YYYY-MM-DD) for each gage
+    - end_date column: End date (YYYY-MM-DD) for each gage
+    
+    Date ranges longer than max-months will be automatically subdivided.
+    """
+    if not api_key:
+        console.print("[red]Error: API key is missing. Set PL_API_KEY env var or use --api-key.[/red]")
+        return
+    
+    try:
+        # Read shapefile
+        gdf = gpd.read_file(shp)
+        gdf = gdf.to_crs(epsg=4326)
+        
+        console.print(f"[bold blue]📂 Loaded shapefile with {len(gdf)} features[/bold blue]")
+        console.print(f"[dim]Columns: {', '.join(gdf.columns.tolist())}[/dim]")
+        
+        # Validate required columns
+        required_cols = [gage_id_col, start_date_col, end_date_col]
+        missing_cols = [col for col in required_cols if col not in gdf.columns]
+        if missing_cols:
+            console.print(f"[red]Error: Missing required columns: {missing_cols}[/red]")
+            console.print(f"[yellow]Available columns: {gdf.columns.tolist()}[/yellow]")
+            return
+        
+        # Prepare orders
+        all_orders = []
+        for idx, row in gdf.iterrows():
+            gage_id = str(row[gage_id_col])
+            start_date = str(row[start_date_col])
+            end_date = str(row[end_date_col])
+            
+            # Parse dates - handle various formats
+            try:
+                # Try parsing to validate dates
+                start_dt = datetime.strptime(start_date.strip(), "%Y-%m-%d")
+                end_dt = datetime.strptime(end_date.strip(), "%Y-%m-%d")
+                start_date = start_dt.strftime("%Y-%m-%d")
+                end_date = end_dt.strftime("%Y-%m-%d")
+            except ValueError as e:
+                console.print(f"[yellow]⚠️ Skipping {gage_id}: Invalid date format ({e})[/yellow]")
+                continue
+            
+            # Subdivide if needed
+            date_chunks = subdivide_date_range(start_date, end_date, max_months)
+            
+            for chunk_start, chunk_end in date_chunks:
+                all_orders.append({
+                    "gage_id": gage_id,
+                    "start_date": chunk_start,
+                    "end_date": chunk_end,
+                    "geometry": row.geometry,
+                    "row_idx": idx
+                })
+        
+        console.print(f"\n[bold green]📋 Prepared {len(all_orders)} orders from {len(gdf)} gages[/bold green]")
+        
+        # Show order summary
+        console.print("\n[bold]Order Summary:[/bold]")
+        gage_order_counts = defaultdict(int)
+        for order in all_orders:
+            gage_order_counts[order["gage_id"]] += 1
+        
+        for gage_id, count in gage_order_counts.items():
+            if count > 1:
+                console.print(f"  • {gage_id}: {count} orders (date range subdivided)")
+            else:
+                console.print(f"  • {gage_id}: {count} order")
+        
+        if dry_run:
+            console.print("\n[bold yellow]🔍 DRY RUN MODE - No orders will be submitted[/bold yellow]")
+        
+        # Determine product bundle
+        if bundle:
+            product_bundle = bundle
+            console.print(f"\n[✅] Using override bundle: {product_bundle}")
+        elif num_bands == "four_bands":
+            product_bundle = "analytic_sr_udm2"
+            console.print(f"\n[✅] Using 4-band surface reflectance: {product_bundle}")
+        else:
+            # For 8-band, use the earliest year to determine bundle
+            earliest_year = min(int(o["start_date"].split('-')[0]) for o in all_orders)
+            product_bundle = "analytic_8b_sr_udm2" if earliest_year >= 2022 else "analytic_sr_udm2"
+            console.print(f"\n[✅] Using 8-band surface reflectance: {product_bundle}")
+        
+        # Process orders
+        results = {
+            "submitted": [],
+            "failed": [],
+            "no_scenes": []
+        }
+        
+        console.print("\n[bold]Processing orders...[/bold]\n")
+        
+        for i, order in enumerate(all_orders, 1):
+            gage_id = order["gage_id"]
+            start_date = order["start_date"]
+            end_date = order["end_date"]
+            geom = order["geometry"]
+            
+            console.print(f"[{i}/{len(all_orders)}] {gage_id}: {start_date} to {end_date}...", end=" ")
+            
+            # Prepare geometry
+            aoi_geom = geom
+            aoi_geojson = aoi_geom.__geo_interface__
+            
+            # Calculate area (approximate, in sq km)
+            # For more accurate area, would need to project to a local CRS
+            aoi_area_sqkm = geom.area * 111.32 * 111.32  # Rough approximation at equator
+            
+            result = submit_single_order(
+                aoi_geom=aoi_geom,
+                aoi_geojson=aoi_geojson,
+                aoi_area_sqkm=aoi_area_sqkm,
+                start_date=start_date,
+                end_date=end_date,
+                gage_id=gage_id,
+                num_bands=num_bands,
+                product_bundle=product_bundle,
+                cadence=cadence,
+                api_key=api_key,
+                dry_run=dry_run
+            )
+            
+            if result.get("success"):
+                if dry_run:
+                    console.print(f"[green]✓ Would submit ({result.get('scenes_selected', 0)} scenes)[/green]")
+                else:
+                    console.print(f"[green]✓ Order {result['order_id'][:8]}... ({result.get('scenes_selected', 0)} scenes)[/green]")
+                results["submitted"].append(result)
+            elif "No cloud-free" in result.get("error", "") or "No full-coverage" in result.get("error", ""):
+                console.print(f"[yellow]⚠ No valid scenes[/yellow]")
+                results["no_scenes"].append({**order, **result})
+            else:
+                console.print(f"[red]✗ {result.get('error', 'Unknown error')[:50]}...[/red]")
+                results["failed"].append({**order, **result})
+        
+        # Summary
+        console.print("\n" + "="*60)
+        console.print("[bold]📊 Batch Order Summary[/bold]")
+        console.print("="*60)
+        
+        if dry_run:
+            console.print(f"[green]Would submit: {len(results['submitted'])} orders[/green]")
+        else:
+            console.print(f"[green]Submitted: {len(results['submitted'])} orders[/green]")
+        
+        if results["no_scenes"]:
+            console.print(f"[yellow]No valid scenes: {len(results['no_scenes'])} orders[/yellow]")
+            for item in results["no_scenes"]:
+                console.print(f"  - {item['gage_id']}: {item['start_date']} to {item['end_date']}")
+        
+        if results["failed"]:
+            console.print(f"[red]Failed: {len(results['failed'])} orders[/red]")
+            for item in results["failed"]:
+                console.print(f"  - {item['gage_id']}: {item.get('error', 'Unknown')[:60]}")
+        
+        if not dry_run and results["submitted"]:
+            console.print(f"\n[bold green]🎉 Successfully submitted {len(results['submitted'])} orders![/bold green]")
+            console.print("[dim]Use 'check-order-status <order_id>' to monitor each order.[/dim]")
+        
+    except Exception as e:
+        console.print(f"[red]Error: {str(e)}[/red]")
+        import traceback
+        console.print(f"[dim]{traceback.format_exc()}[/dim]")
+        sys.exit(1)
+
+
 @cli.command()
 @click.option("--start-date", required=True, help="Start date (YYYY-MM-DD)")
 @click.option("--end-date", required=True, help="End date (YYYY-MM-DD)")
@@ -557,6 +916,7 @@ def list_basemaps(start_date, end_date, api_key):
 cli.add_command(convert_shp)
 cli.add_command(order_basemap)
 cli.add_command(submit)
+cli.add_command(batch_submit)
 cli.add_command(check_order_status)
 cli.add_command(list_basemaps)
 cli.add_command(generate_aoi)
