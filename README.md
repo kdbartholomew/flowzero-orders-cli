@@ -112,7 +112,7 @@ python main.py batch-submit \
 | `--end-date-col` | `end_date` | Column name for end date |
 | `--num-bands` | `four_bands` | `four_bands` or `eight_bands` |
 | `--cadence` | `weekly` | Scene selection: `daily`, `weekly`, or `monthly` |
-| `--max-months` | `9` | Maximum months per order (auto-subdivides longer ranges) |
+| `--max-months` | `6` | Maximum months per order (auto-subdivides longer ranges) |
 | `--bundle` | auto | Override product bundle name |
 | `--dry-run` | false | Preview orders without submitting |
 | `--api-key` | env var | Planet API key |
@@ -124,7 +124,7 @@ python main.py batch-submit \
 - End date column (YYYY-MM-DD format)
 
 **Automatic Date Subdivision:**
-Date ranges longer than `--max-months` (default 9) are automatically split into multiple orders. For example, a 2-year date range becomes three orders: 9 months + 9 months + 6 months.
+Date ranges longer than `--max-months` (default 6) are automatically split into multiple orders. For example, a 2-year date range becomes four orders: 6 months each.
 
 **Example Output:**
 ```
@@ -144,8 +144,8 @@ Order Summary:
 
 Processing orders...
 
-[1/8] Gage_001: 2024-01-01 to 2024-09-30... ✓ Order a1b2c3d4... (15 scenes)
-[2/8] Gage_001: 2024-10-01 to 2024-12-31... ✓ Order e5f6g7h8... (6 scenes)
+[1/8] Gage_001: 2024-01-01 to 2024-06-30... ✓ Order a1b2c3d4... (12 scenes)
+[2/8] Gage_001: 2024-07-01 to 2024-12-31... ✓ Order e5f6g7h8... (10 scenes)
 ...
 
 ============================================================
@@ -330,10 +330,11 @@ s3://flowzero/
 - **Purpose**: Submit multiple orders from a single shapefile with per-gage date ranges
 - **Key Features**:
   - Reads shapefile with gage IDs, geometries, and individual date ranges
-  - Automatically subdivides date ranges > 9 months into multiple orders
+  - Automatically subdivides date ranges into 6-month intervals (configurable)
   - Progress tracking with success/failure summary
   - Dry-run mode for previewing without submitting
   - Configurable column names for flexibility with different shapefile schemas
+  - **Pagination limit detection**: Stops and alerts user if Planet API returns 100 items (limit hit)
 
 ### New Helper Functions
 - `subdivide_date_range()`: Splits long date ranges into manageable chunks
@@ -355,8 +356,14 @@ s3://flowzero/
 - Consider splitting into smaller AOIs
 
 ### Date range subdivision
-- Orders are limited to ~9 months to avoid Planet API limits
-- Use `--max-months` to adjust if needed
+- Orders are limited to 6 months by default to avoid Planet API pagination limits
+- Planet's quick-search API returns max 100 items per request
+- If you hit the pagination limit, reduce `--max-months` (try 3 or less)
+
+### "Pagination limit hit: 100 scenes returned"
+- Your date range is too large for the AOI
+- Reduce `--max-months` (e.g., `--max-months 3`)
+- Or manually use smaller date ranges
 
 ---
 
