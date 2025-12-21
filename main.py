@@ -87,7 +87,7 @@ def get_week_start_date(date_str):
     return sunday.strftime('%Y_%m_%d')
 
 
-def subdivide_date_range(start_date: str, end_date: str, max_months: int = 9) -> List[Tuple[str, str]]:
+def subdivide_date_range(start_date: str, end_date: str, max_months: int = 6) -> List[Tuple[str, str]]:
     """
     Subdivide a date range into chunks of max_months or less.
     
@@ -166,6 +166,15 @@ def submit_single_order(
     features = search_response.json().get("features", [])
     if not features:
         return {"success": False, "error": "No cloud-free scenes found", "scenes_found": 0}
+    
+    # Check for Planet API pagination limit (100 items)
+    if len(features) >= 100:
+        return {
+            "success": False, 
+            "error": f"Pagination limit hit: {len(features)} scenes returned. Please reduce date range (try --max-months 3 or smaller intervals).",
+            "scenes_found": len(features),
+            "pagination_limit_hit": True
+        }
     
     def get_interval_key(date_obj):
         if cadence == "daily":
@@ -353,6 +362,13 @@ def submit(geojson, start_date, end_date, num_bands, api_key, bundle, cadence):
         if not features:
             console.print("[yellow]No cloud-free PlanetScope scenes found.[/yellow]")
             return
+
+        # Check for Planet API pagination limit (100 items)
+        if len(features) >= 100:
+            console.print(f"[bold red]❌ Pagination limit hit: {len(features)} scenes returned.[/bold red]")
+            console.print("[yellow]Planet API limits search results to 100 items per request.[/yellow]")
+            console.print("[yellow]Please reduce your date range and try again (e.g., use 3-month intervals).[/yellow]")
+            sys.exit(1)
 
         def get_interval_key(date_obj):
             if cadence == "daily":
@@ -651,6 +667,13 @@ def search_scenes(geojson, start_date, end_date, cadence, api_key):
         console.print("[yellow]No scenes found.[/yellow]")
         return
 
+    # Check for Planet API pagination limit (100 items)
+    if len(features) >= 100:
+        console.print(f"[bold red]❌ Pagination limit hit: {len(features)} scenes returned.[/bold red]")
+        console.print("[yellow]Planet API limits search results to 100 items per request.[/yellow]")
+        console.print("[yellow]Please reduce your date range and try again (e.g., use 3-month intervals).[/yellow]")
+        return
+
     def get_interval_key(date_obj):
         if cadence == "daily":
             return date_obj.strftime("%Y-%m-%d")
@@ -694,7 +717,7 @@ def search_scenes(geojson, start_date, end_date, cadence, api_key):
 @click.option("--api-key", default=os.getenv("PL_API_KEY"), help="Planet API Key")
 @click.option("--bundle", default=None, help="Override bundle name to use")
 @click.option("--cadence", type=click.Choice(["daily", "weekly", "monthly"]), default="weekly", help="Scene selection cadence")
-@click.option("--max-months", default=9, type=int, help="Maximum months per order chunk (default: 9)")
+@click.option("--max-months", default=6, type=int, help="Maximum months per order chunk (default: 6)")
 @click.option("--dry-run", is_flag=True, help="Preview orders without submitting")
 def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_key, bundle, cadence, max_months, dry_run):
     """
@@ -833,6 +856,13 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
                 else:
                     console.print(f"[green]✓ Order {result['order_id'][:8]}... ({result.get('scenes_selected', 0)} scenes)[/green]")
                 results["submitted"].append(result)
+            elif result.get("pagination_limit_hit"):
+                console.print(f"[bold red]✗ PAGINATION LIMIT HIT[/bold red]")
+                console.print(f"[yellow]  → Reduce --max-months (currently {max_months}) or use smaller date ranges[/yellow]")
+                results["failed"].append({**order, **result})
+                # Stop processing - user needs to fix the interval size
+                console.print(f"\n[bold red]⛔ Stopping batch processing. Please reduce --max-months and retry.[/bold red]")
+                break
             elif "No cloud-free" in result.get("error", "") or "No full-coverage" in result.get("error", ""):
                 console.print(f"[yellow]⚠ No valid scenes[/yellow]")
                 results["no_scenes"].append({**order, **result})
