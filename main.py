@@ -4,6 +4,7 @@ import json
 import re
 import io
 import mimetypes
+import uuid
 from pathlib import Path
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
@@ -133,7 +134,8 @@ def submit_single_order(
     product_bundle: str,
     cadence: str,
     api_key: str,
-    dry_run: bool = False
+    dry_run: bool = False,
+    batch_id: str = None
 ) -> dict:
     """
     Submit a single order to Planet API.
@@ -167,8 +169,8 @@ def submit_single_order(
     if not features:
         return {"success": False, "error": "No cloud-free scenes found", "scenes_found": 0}
     
-    # Check for Planet API pagination limit (100 items)
-    if len(features) >= 100:
+    # Check for Planet API pagination limit (250 items)
+    if len(features) >= 250:
         return {
             "success": False, 
             "error": f"Pagination limit hit: {len(features)} scenes returned. Please reduce date range (try --max-months 3 or smaller intervals).",
@@ -240,7 +242,7 @@ def submit_single_order(
     
     if response.status_code == 202:
         order_id = response.json()["id"]
-        log_order({
+        order_log = {
             "order_id": order_id,
             "aoi_name": gage_id,
             "order_type": "PSScope",
@@ -253,7 +255,10 @@ def submit_single_order(
             "scenes_selected": len(selected),
             "batch_order": True,
             "timestamp": datetime.now().isoformat()
-        })
+        }
+        if batch_id:
+            order_log["batch_id"] = batch_id
+        log_order(order_log)
         return {
             "success": True,
             "order_id": order_id,
@@ -363,10 +368,10 @@ def submit(geojson, start_date, end_date, num_bands, api_key, bundle, cadence):
             console.print("[yellow]No cloud-free PlanetScope scenes found.[/yellow]")
             return
 
-        # Check for Planet API pagination limit (100 items)
-        if len(features) >= 100:
+        # Check for Planet API pagination limit (250 items)
+        if len(features) >= 250:
             console.print(f"[bold red]❌ Pagination limit hit: {len(features)} scenes returned.[/bold red]")
-            console.print("[yellow]Planet API limits search results to 100 items per request.[/yellow]")
+            console.print("[yellow]Planet API limits search results to 250 items per request.[/yellow]")
             console.print("[yellow]Please reduce your date range and try again (e.g., use 3-month intervals).[/yellow]")
             sys.exit(1)
 
@@ -625,6 +630,216 @@ def check_order_status(order_id, api_key):
 
     console.print(f"[🎉] Order processing complete! All files uploaded to S3.", style="bold green")
 
+
+@cli.command()
+@click.argument("batch_id")
+@click.option("--api-key", default=os.getenv("PL_API_KEY"), help="Planet API Key")
+@click.option("--skip-completed", is_flag=True, help="Skip orders that are already in 'success' state")
+def batch_check_status(batch_id, api_key, skip_completed):
+    """
+    Check status and download all orders in a batch.
+    
+    Finds all orders with the given batch_id from orders.json and processes each one.
+    """
+    if not api_key:
+        console.print("[red]Error: API key is missing. Set PL_API_KEY env var or use --api-key.[/red]")
+        return
+    
+    if not ORDERS_LOG_FILE.exists():
+        console.print(f"[red]Error: {ORDERS_LOG_FILE} not found.[/red]")
+        return
+    
+    try:
+        with ORDERS_LOG_FILE.open("r") as f:
+            orders = json.load(f)
+    except json.JSONDecodeError as e:
+        console.print(f"[red]Error reading {ORDERS_LOG_FILE}: {e}[/red]")
+        return
+    
+    # Find all orders with this batch_id
+    batch_orders = [o for o in orders if o.get("batch_id") == batch_id]
+    
+    if not batch_orders:
+        console.print(f"[yellow]No orders found with batch_id: {batch_id}[/yellow]")
+        console.print("[dim]Available batch_ids in orders.json:[/dim]")
+        batch_ids = set(o.get("batch_id") for o in orders if o.get("batch_id"))
+        if batch_ids:
+            for bid in sorted(batch_ids):
+                count = sum(1 for o in orders if o.get("batch_id") == bid)
+                console.print(f"  • {bid} ({count} orders)")
+        else:
+            console.print("  (none found)")
+        return
+    
+    console.print(f"[bold blue]📦 Found {len(batch_orders)} orders in batch: {batch_id}[/bold blue]\n")
+    
+    # Process each order
+    results = {
+        "success": [],
+        "pending": [],
+        "failed": [],
+        "skipped": []
+    }
+    
+    for i, order in enumerate(batch_orders, 1):
+        order_id = order.get("order_id")
+        aoi_name = order.get("aoi_name", "Unknown")
+        start_date = order.get("start_date", "N/A")
+        end_date = order.get("end_date", "N/A")
+        
+        console.print(f"[{i}/{len(batch_orders)}] Checking {aoi_name} ({start_date} to {end_date})...")
+        console.print(f"  Order ID: {order_id}")
+        
+        # Check order status
+        response = requests.get(f"https://api.planet.com/compute/ops/orders/v2/{order_id}", auth=(api_key, ""))
+        
+        if response.status_code != 200:
+            console.print(f"  [❌] Error checking order status: {response.text[:100]}", style="bold red")
+            results["failed"].append({"order_id": order_id, "error": response.text[:100]})
+            continue
+        
+        order_info = response.json()
+        order_state = order_info["state"]
+        console.print(f"  [✅] Status: {order_state}")
+        
+        if skip_completed and order_state == "success":
+            console.print(f"  [⏭️] Skipping (already completed)[/⏭️]")
+            results["skipped"].append(order)
+            continue
+        
+        if order_state != "success":
+            console.print(f"  [⏳] Order not ready yet (state: {order_state})[/⏳]")
+            results["pending"].append({"order_id": order_id, "state": order_state})
+            continue
+        
+        # Order is ready - process it (reuse logic from check_order_status)
+        aoi_name_normalized = normalize_aoi_name(order.get("aoi_name", "UnknownAOI"))
+        mosaic_name = order.get("mosaic_name", "unknown_mosaic")
+        order_type = order.get("order_type", "Unknown")
+        num_bands = order.get("num_bands", "four_bands")
+        product_bundle = order.get("product_bundle")
+        
+        is_basemap = "source_type" in order_info and order_info["source_type"] == "basemaps"
+        
+        download_links = order_info["_links"].get("results", [])
+        if not download_links:
+            console.print("  [⚠️] No downloadable files found.")
+            results["failed"].append({"order_id": order_id, "error": "No downloadable files"})
+            continue
+        
+        # Process and upload files (same logic as check_order_status)
+        try:
+            if order_type == "PSScope" and num_bands == "four_bands":
+                console.print(f"  [🔍] Processing PSScope Order - Organizing by week...")
+                image_metadata = []
+                processed_filenames = set()
+                for link in download_links:
+                    filename = Path(link.get("name", "")).name
+                    if filename in processed_filenames:
+                        continue
+                    processed_filenames.add(filename)
+                    if not filename.lower().endswith('.tif') or 'udm' in filename.lower() or filename.lower().endswith('.xml'):
+                        continue
+                    date_str = extract_date_from_filename(filename)
+                    if not date_str:
+                        continue
+                    week_start = get_week_start_date(date_str)
+                    scene_id = extract_scene_id(filename) or "unknown"
+                    image_metadata.append({
+                        'filename': filename,
+                        'date': date_str,
+                        'week_start': week_start, 
+                        'scene_id': scene_id,
+                        'url': link.get('location'),
+                        'size': link.get('length', 0)
+                    })
+                weeks = {}
+                for img in sorted(image_metadata, key=lambda x: (x['week_start'], x['date'])):
+                    week = img['week_start']
+                    if week not in weeks:
+                        weeks[week] = img
+                console.print(f"  [✅] Found {len(image_metadata)} images across {len(weeks)} weeks")
+                s3_path_prefix = f"planetscope analytic/four_bands/{aoi_name_normalized}"
+                for week, img in weeks.items():
+                    s3_key = f"{s3_path_prefix}/{img['date']}_{img['scene_id']}.tiff"
+                    console.print(f"  [⬆️] Uploading: {img['filename']} -> s3://{S3_BUCKET}/{s3_key}")
+                    r = requests.get(img['url'], stream=True)
+                    if r.status_code == 200:
+                        try:
+                            s3.upload_fileobj(
+                                io.BytesIO(r.content),
+                                S3_BUCKET,
+                                s3_key
+                            )
+                            console.print(f"  [✅] Uploaded successfully")
+                        except Exception as e:
+                            console.print(f"  [❌] Error uploading: {str(e)}", style="bold red")
+                    else:
+                        console.print(f"  [❌] Failed to download: {r.status_code}", style="bold red")
+            elif is_basemap or order_type == "Basemap (Composite)":
+                mosaic_parts = mosaic_name.split("_")
+                if len(mosaic_parts) >= 4 and len(mosaic_parts[2]) == 4:
+                    mosaic_date = f"{mosaic_parts[2]}_{mosaic_parts[3]}"
+                else:
+                    mosaic_date = "unknown_date"
+                s3_path_prefix = f"basemaps/{aoi_name_normalized}/{mosaic_date}"
+                console.print(f"  [⬆️] Uploading Basemap files to s3://{S3_BUCKET}/{s3_path_prefix}")
+                for link in download_links:
+                    filename = Path(link.get("name", "")).name
+                    s3_key = f"{s3_path_prefix}/{filename}"
+                    console.print(f"  [⬆️] Uploading: {filename}")
+                    r = requests.get(link.get('location'), stream=True)
+                    if r.status_code == 200:
+                        try:
+                            s3.upload_fileobj(
+                                io.BytesIO(r.content),
+                                S3_BUCKET,
+                                s3_key
+                            )
+                            console.print(f"  [✅] Uploaded successfully")
+                        except Exception as e:
+                            console.print(f"  [❌] Error uploading: {str(e)}", style="bold red")
+                    else:
+                        console.print(f"  [❌] Failed to download: {r.status_code}", style="bold red")
+            
+            # Save metadata
+            metadata_json = json.dumps(order_info, indent=2)
+            if is_basemap or order_type == "Basemap (Composite)":
+                s3_metadata_path = f"basemaps/{aoi_name_normalized}/{mosaic_date}/metadata.json"
+            else:
+                s3_metadata_path = f"planetscope analytic/four_bands/{aoi_name_normalized}/metadata.json"
+            s3.put_object(
+                Body=metadata_json,
+                Bucket=S3_BUCKET,
+                Key=s3_metadata_path
+            )
+            console.print(f"  [✅] Metadata saved to S3")
+            console.print(f"  [🎉] Order complete!\n")
+            results["success"].append(order)
+        except Exception as e:
+            console.print(f"  [❌] Error processing order: {str(e)}", style="bold red")
+            results["failed"].append({"order_id": order_id, "error": str(e)})
+    
+    # Summary
+    console.print("\n" + "="*60)
+    console.print("[bold]📊 Batch Status Check Summary[/bold]")
+    console.print("="*60)
+    console.print(f"[green]Completed & Uploaded: {len(results['success'])}[/green]")
+    if results["pending"]:
+        console.print(f"[yellow]Pending (not ready): {len(results['pending'])}[/yellow]")
+        for item in results["pending"]:
+            console.print(f"  - {item['order_id'][:8]}... ({item.get('state', 'unknown')})")
+    if results["skipped"]:
+        console.print(f"[dim]Skipped (already completed): {len(results['skipped'])}[/dim]")
+    if results["failed"]:
+        console.print(f"[red]Failed: {len(results['failed'])}[/red]")
+        for item in results["failed"]:
+            console.print(f"  - {item.get('order_id', 'unknown')[:8]}...: {item.get('error', 'Unknown')[:50]}")
+    
+    if results["pending"]:
+        console.print(f"\n[yellow]💡 Run again later to check pending orders, or use --skip-completed to only process new ones.[/yellow]")
+
+
 @cli.command()
 @click.option("--geojson", required=True, type=click.Path(exists=True), help="Path to AOI GeoJSON")
 @click.option("--start-date", required=True, help="Start date (YYYY-MM-DD)")
@@ -667,10 +882,10 @@ def search_scenes(geojson, start_date, end_date, cadence, api_key):
         console.print("[yellow]No scenes found.[/yellow]")
         return
 
-    # Check for Planet API pagination limit (100 items)
-    if len(features) >= 100:
+    # Check for Planet API pagination limit (250 items)
+    if len(features) >= 250:
         console.print(f"[bold red]❌ Pagination limit hit: {len(features)} scenes returned.[/bold red]")
-        console.print("[yellow]Planet API limits search results to 100 items per request.[/yellow]")
+        console.print("[yellow]Planet API limits search results to 250 items per request.[/yellow]")
         console.print("[yellow]Please reduce your date range and try again (e.g., use 3-month intervals).[/yellow]")
         return
 
@@ -795,6 +1010,11 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
             else:
                 console.print(f"  • {gage_id}: {count} order")
         
+        # Generate batch_id for this batch submission
+        batch_id = str(uuid.uuid4())
+        console.print(f"\n[bold cyan]📦 Batch ID: {batch_id}[/bold cyan]")
+        console.print("[dim]Use this ID to check status of all orders in this batch: batch-check-status[/dim]")
+        
         if dry_run:
             console.print("\n[bold yellow]🔍 DRY RUN MODE - No orders will be submitted[/bold yellow]")
         
@@ -847,7 +1067,8 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
                 product_bundle=product_bundle,
                 cadence=cadence,
                 api_key=api_key,
-                dry_run=dry_run
+                dry_run=dry_run,
+                batch_id=batch_id
             )
             
             if result.get("success"):
@@ -892,7 +1113,9 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
         
         if not dry_run and results["submitted"]:
             console.print(f"\n[bold green]🎉 Successfully submitted {len(results['submitted'])} orders![/bold green]")
-            console.print("[dim]Use 'check-order-status <order_id>' to monitor each order.[/dim]")
+            console.print(f"[bold cyan]📦 Batch ID: {batch_id}[/bold cyan]")
+            console.print(f"[dim]Check all orders in this batch: python main.py batch-check-status {batch_id}[/dim]")
+            console.print("[dim]Or check individual orders: check-order-status <order_id>[/dim]")
         
     except Exception as e:
         console.print(f"[red]Error: {str(e)}[/red]")
@@ -948,6 +1171,7 @@ cli.add_command(order_basemap)
 cli.add_command(submit)
 cli.add_command(batch_submit)
 cli.add_command(check_order_status)
+cli.add_command(batch_check_status)
 cli.add_command(list_basemaps)
 cli.add_command(generate_aoi)
 cli.add_command(search_scenes)
