@@ -228,6 +228,40 @@ When an order is complete (`success` state), this command:
 
 ---
 
+### `batch-check-status` ⭐ NEW
+Check status and download all orders in a batch by batch_id.
+
+```bash
+python main.py batch-check-status <batch_id> --api-key API_KEY
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `batch_id` | required | Batch ID from batch-submit output |
+| `--api-key` | env var | Planet API Key |
+| `--skip-completed` | false | Skip orders already in 'success' state |
+
+**Usage:**
+1. After running `batch-submit`, note the Batch ID shown in the output
+2. Run `batch-check-status` with that ID to check all orders at once
+3. Use `--skip-completed` on subsequent runs to only process new orders
+
+**Example:**
+```bash
+# After batch-submit shows: "📦 Batch ID: abc123-def4-5678-..."
+python main.py batch-check-status abc123-def4-5678-... --api-key API_KEY
+
+# Later, skip already-completed orders:
+python main.py batch-check-status abc123-def4-5678-... --skip-completed
+```
+
+**Output:**
+- Shows status for each order in the batch
+- Processes and uploads completed orders automatically
+- Provides summary of completed, pending, and failed orders
+
+---
+
 ## Workflow Examples
 
 ### Single AOI Order
@@ -257,7 +291,10 @@ python main.py batch-submit --shp ./all_gages.shp --dry-run
 # 3. Submit all orders
 python main.py batch-submit --shp ./all_gages.shp
 
-# 4. Check each order status
+# 4. Check all orders in batch (recommended)
+python main.py batch-check-status <batch_id> --api-key API_KEY
+
+# Or check individual orders
 python main.py check-order-status <order_id_1>
 python main.py check-order-status <order_id_2>
 # ...
@@ -299,6 +336,7 @@ All orders are logged to `orders.json` with metadata:
   "product_bundle": "analytic_sr_udm2",
   "scenes_selected": 15,
   "batch_order": true,
+  "batch_id": "abc123-def4-5678-9012-34567890abcd",
   "timestamp": "2024-12-15T10:30:00"
 }
 ```
@@ -334,7 +372,7 @@ s3://flowzero/
   - Progress tracking with success/failure summary
   - Dry-run mode for previewing without submitting
   - Configurable column names for flexibility with different shapefile schemas
-  - **Pagination limit detection**: Stops and alerts user if Planet API returns 100 items (limit hit)
+  - **Pagination limit detection**: Stops and alerts user if Planet API returns 250 items (limit hit)
 
 ### New Helper Functions
 - `subdivide_date_range()`: Splits long date ranges into manageable chunks
@@ -342,6 +380,15 @@ s3://flowzero/
 
 ### New Dependency
 - `python-dateutil`: For reliable month-based date arithmetic
+
+### Added: `batch-check-status` Command
+- **Purpose**: Check status and download all orders in a batch by batch_id
+- **Key Features**:
+  - Finds all orders with a given batch_id from orders.json
+  - Processes each order sequentially with progress tracking
+  - Automatically uploads completed orders to S3
+  - `--skip-completed` flag to skip already-processed orders
+  - Summary report of completed, pending, and failed orders
 
 ---
 
@@ -357,10 +404,10 @@ s3://flowzero/
 
 ### Date range subdivision
 - Orders are limited to 6 months by default to avoid Planet API pagination limits
-- Planet's quick-search API returns max 100 items per request
+- Planet's quick-search API returns max 250 items per request
 - If you hit the pagination limit, reduce `--max-months` (try 3 or less)
 
-### "Pagination limit hit: 100 scenes returned"
+### "Pagination limit hit: 250 scenes returned"
 - Your date range is too large for the AOI
 - Reduce `--max-months` (e.g., `--max-months 3`)
 - Or manually use smaller date ranges
