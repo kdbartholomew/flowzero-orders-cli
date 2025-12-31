@@ -27,6 +27,7 @@ load_dotenv()
 console = Console()
 ORDERS_LOG_FILE = Path("orders.json")
 API_URL = "https://api.planet.com/basemaps/v1/mosaics"
+MIN_COV_PCT = 98.0
 
 # Initialize S3 client
 s3 = boto3.client(
@@ -154,7 +155,9 @@ def submit_single_order(
             "config": [
                 {"type": "GeometryFilter", "field_name": "geometry", "config": aoi_geojson},
                 {"type": "DateRangeFilter", "field_name": "acquired", "config": {"gte": start_date_iso, "lte": end_date_iso}},
-                {"type": "RangeFilter", "field_name": "cloud_cover", "config": {"lte": 0.0}}
+                {"type": "RangeFilter", "field_name": "cloud_cover", "config": {"lte": 0.0}},
+                {"type": "AssetFilter", "config": [product_bundle]},
+                {"type":"StringInFilter", "field_name":"quality_category", "config":["standard"]}
             ]
         }
     }
@@ -194,23 +197,25 @@ def submit_single_order(
         geom = shape(feature["geometry"])
         intersect_area = geom.intersection(aoi_geom).area
         coverage_pct = (intersect_area / aoi_geom.area) * 100
-        if coverage_pct < 99:
+        if coverage_pct < MIN_COV_PCT:
             continue
         
         date_str = props["acquired"][:10]
         date_obj = datetime.strptime(date_str, "%Y-%m-%d")
         key = get_interval_key(date_obj)
-        scene_groups[key].append((coverage_pct, feature))
+        scene_groups[key].append((coverage_pct, date_obj, feature))
     
+    # Sort each group by coverage descending, then date ascending; select first
     selected = []
-    for key in sorted(scene_groups):
-        best = sorted(scene_groups[key], key=lambda x: -x[0])[0]
-        selected.append(best[1])
+    for group in scene_groups.values():
+        group.sort(key=lambda x: (-x[0], x[1]))  # coverage desc, date asc
+        coverage_pct, date, f = group[0]
+        selected.append((f, coverage_pct, date))
     
     if not selected:
         return {"success": False, "error": "No full-coverage scenes matched filter", "scenes_found": len(features)}
     
-    item_ids = [f["id"] for f in selected]
+    item_ids = [f["id"] for f, _, _ in selected]
     
     if dry_run:
         return {
@@ -326,8 +331,10 @@ def submit(geojson, start_date, end_date, num_bands, api_key, bundle, cadence):
         gdf = gdf.to_crs(epsg=4326)
         aoi_geom = gdf.geometry.union_all()
         aoi = aoi_geom.__geo_interface__
-        aoi_area_sqkm = gdf.area.sum() / 1e6
 
+        gdf_equal_area = gdf.to_crs(epsg=6933)  # World Cylindrical Equal Area
+        # Compute area in sq km using equal-area CRS
+        aoi_area_sqkm = gdf_equal_area.area.sum() / 1e6  # m² → km²
         console.print(f"[✓] AOI area: {aoi_area_sqkm:.2f} sq km", style="bold blue")
 
         start_year = int(start_date.split('-')[0])
@@ -336,12 +343,20 @@ def submit(geojson, start_date, end_date, num_bands, api_key, bundle, cadence):
             product_bundle = bundle
             console.print(f"[✅] Using override bundle: {product_bundle}", style="bold blue")
         elif num_bands == "four_bands":
-            product_bundle = "analytic_sr_udm2"
+            product_bundle = "ortho_analytic_4b_sr"
             console.print(f"[✅] Using 4-band surface reflectance: {product_bundle}", style="bold blue")
         else:
-            product_bundle = "analytic_8b_sr_udm2" if start_year >= 2022 else "analytic_sr_udm2"
+            product_bundle = "ortho_analytic_8b_sr" if start_year >= 2021 else "ortho_analytic_4b_sr"
             console.print(f"[✅] Using 8-band surface reflectance: {product_bundle}", style="bold blue")
-
+        
+        #Cross walk product bundle for ordering
+        if product_bundle == "ortho_analytic_4b_sr":
+            product_bundle_order = "analytic_sr_udm2"
+        elif product_bundle == "ortho_analytic_8b_sr":
+            product_bundle_order = "analytic_8b_sr_udm2"
+        else:
+            product_bundle_order = product_bundle
+        
         # Perform scene search with cadence filtering (as in search-scenes)
         search_url = "https://api.planet.com/data/v1/quick-search"
         search_payload = {
@@ -351,7 +366,9 @@ def submit(geojson, start_date, end_date, num_bands, api_key, bundle, cadence):
                 "config": [
                     {"type": "GeometryFilter", "field_name": "geometry", "config": aoi},
                     {"type": "DateRangeFilter", "field_name": "acquired", "config": {"gte": start_date_iso, "lte": end_date_iso}},
-                    {"type": "RangeFilter", "field_name": "cloud_cover", "config": {"lte": 0.0}}
+                    {"type": "RangeFilter", "field_name": "cloud_cover", "config": {"lte": 0.0}},
+                    {"type": "AssetFilter", "config": [product_bundle]},
+                    {"type":"StringInFilter", "field_name":"quality_category", "config":["standard"]}
                 ]
             }
         }
@@ -391,25 +408,38 @@ def submit(geojson, start_date, end_date, num_bands, api_key, bundle, cadence):
             geom = shape(feature["geometry"])
             intersect_area = geom.intersection(aoi_geom).area
             coverage_pct = (intersect_area / aoi_geom.area) * 100
-            if coverage_pct < 99:
+            if coverage_pct < MIN_COV_PCT:
                 continue
 
             date_str = props["acquired"][:10]
             date_obj = datetime.strptime(date_str, "%Y-%m-%d")
             key = get_interval_key(date_obj)
-            scene_groups[key].append((coverage_pct, feature))
+            scene_groups[key].append((coverage_pct, date_obj, feature))
 
+        # Sort each group by coverage descending, then date ascending; select first
         selected = []
-        for key in sorted(scene_groups):
-            best = sorted(scene_groups[key], key=lambda x: -x[0])[0]
-            selected.append(best[1])
+        for group in scene_groups.values():
+            group.sort(key=lambda x: (-x[0], x[1]))  # coverage desc, date asc
+            coverage_pct, date, f = group[0]
+            selected.append((f, coverage_pct, date))
 
         if not selected:
             console.print("[yellow]No full-coverage scenes matched filter.[/yellow]")
             return
 
         console.print(f"[green]Selected {len(selected)} best scenes ({cadence})[/green]")
-        item_ids = [f["id"] for f in selected]
+        for f, cov, dt in selected:
+            thumb = f["_links"].get("thumbnail")
+            console.print(f"{dt.date()} | ID: {f['id']} | Coverage: {cov:.2f}% | [link={thumb}]thumbnail[/link]")
+
+        # Print the total sqkm covered by this order and ask the user if they want to proceed
+        console.print(f"[blue]Total quota used in this order: {aoi_area_sqkm * len(selected):.2f} sq km[/blue]")
+        proceed = console.input("[yellow]Proceed with order? (y/n): [/yellow]")
+        if proceed.lower() != "y":
+            console.print("[red]Order cancelled by user.[/red]")
+            return
+
+        item_ids = [f["id"] for f, _, _ in selected]
 
         order_url = "https://api.planet.com/compute/ops/orders/v2"
         order_payload = {
@@ -417,7 +447,7 @@ def submit(geojson, start_date, end_date, num_bands, api_key, bundle, cadence):
             "products": [{
                 "item_ids": item_ids,
                 "item_type": "PSScene",
-                "product_bundle": product_bundle
+                "product_bundle": product_bundle_order
             }],
             "tools": [
                 {"clip": {"aoi": aoi}}
@@ -436,13 +466,13 @@ def submit(geojson, start_date, end_date, num_bands, api_key, bundle, cadence):
                 "start_date": start_date,
                 "end_date": end_date,
                 "num_bands": num_bands,
-                "product_bundle": product_bundle,
+                "product_bundle": product_bundle_order,
                 "clipped": True,
                 "aoi_area_sqkm": aoi_area_sqkm,
                 "timestamp": datetime.now().isoformat()
             })
         else:
-            console.print(f"❌ Order submission failed: {response.status_code} - {response.text[:100]}...", style="bold red")
+            console.print(f"❌ Order submission failed: {response.status_code} - {response.text}...", style="bold red")
 
     except Exception as e:
         console.print(f"❌ Error: {str(e)}", style="bold red")
@@ -844,16 +874,34 @@ def batch_check_status(batch_id, api_key, skip_completed):
 @click.option("--geojson", required=True, type=click.Path(exists=True), help="Path to AOI GeoJSON")
 @click.option("--start-date", required=True, help="Start date (YYYY-MM-DD)")
 @click.option("--end-date", required=True, help="End date (YYYY-MM-DD)")
+@click.option("--num-bands", type=click.Choice(['four_bands', 'eight_bands']), default='four_bands', help="Choose 4B or 8B imagery")
+@click.option("--bundle", default=None, help="Override bundle name to use")
 @click.option("--cadence", type=click.Choice(["daily", "weekly", "monthly"]), default="weekly", help="Scene selection cadence")
 @click.option("--api-key", default=os.getenv("PL_API_KEY"), help="Planet API Key")
-def search_scenes(geojson, start_date, end_date, cadence, api_key):
+def search_scenes(geojson, start_date, end_date, num_bands, bundle, cadence, api_key):
     gdf = gpd.read_file(geojson)
     gdf = gdf.to_crs(epsg=4326)
-    aoi_geom = gdf.geometry.unary_union
-    aoi_area = aoi_geom.area
+    aoi_geom = gdf.geometry.union_all()
+
+    gdf_equal_area = gdf.to_crs(epsg=6933)  # World Cylindrical Equal Area
+    # Compute area in sq km using equal-area CRS
+    aoi_area_sqkm = gdf_equal_area.area.sum() / 1e6  # m² → km²
+    console.print(f"[✓] AOI area: {aoi_area_sqkm:.2f} sq km", style="bold blue")
 
     start_iso = f"{start_date}T00:00:00Z"
     end_iso = f"{end_date}T23:59:59Z"
+
+    start_year = int(start_date.split('-')[0])
+
+    if bundle:
+        product_bundle = bundle
+        console.print(f"[✅] Using override bundle: {product_bundle}", style="bold blue")
+    elif num_bands == "four_bands":
+        product_bundle = "ortho_analytic_4b_sr"
+        console.print(f"[✅] Using 4-band surface reflectance: {product_bundle}", style="bold blue")
+    else:
+        product_bundle = "ortho_analytic_8b_sr" if start_year >= 2021 else "analytic_sr_udm2"
+        console.print(f"[✅] Using 8-band surface reflectance: {product_bundle}", style="bold blue")
 
     payload = {
         "item_types": ["PSScene"],
@@ -862,7 +910,9 @@ def search_scenes(geojson, start_date, end_date, cadence, api_key):
             "config": [
                 {"type": "GeometryFilter", "field_name": "geometry", "config": aoi_geom.__geo_interface__},
                 {"type": "DateRangeFilter", "field_name": "acquired", "config": {"gte": start_iso, "lte": end_iso}},
-                {"type": "RangeFilter", "field_name": "cloud_cover", "config": {"lte": 0.0}}
+                {"type": "RangeFilter", "field_name": "cloud_cover", "config": {"lte": 0.0}},
+                {"type": "AssetFilter", "config": [product_bundle]},
+                {"type":"StringInFilter", "field_name":"quality_category", "config":["standard"]}
             ]
         }
     }
@@ -888,6 +938,8 @@ def search_scenes(geojson, start_date, end_date, cadence, api_key):
         console.print("[yellow]Planet API limits search results to 250 items per request.[/yellow]")
         console.print("[yellow]Please reduce your date range and try again (e.g., use 3-month intervals).[/yellow]")
         return
+    else:
+        console.print(f"[✓] Found {len(features)} scenes matching initial criteria.", style="bold blue")
 
     def get_interval_key(date_obj):
         if cadence == "daily":
@@ -902,24 +954,35 @@ def search_scenes(geojson, start_date, end_date, cadence, api_key):
     for f in features:
         props = f["properties"]
         geom = shape(f["geometry"])
+        fid = f["id"]
         intersect_area = geom.intersection(aoi_geom).area
-        coverage_pct = (intersect_area / aoi_area) * 100
-        if coverage_pct < 99:
+        coverage_pct = (intersect_area / aoi_geom.area) * 100
+        if coverage_pct < MIN_COV_PCT:
+            console.print(f"[dim]Skipping {fid}: only {coverage_pct:.2f}% coverage[/dim]")
             continue
 
         date = datetime.strptime(props["acquired"][:10], "%Y-%m-%d")
         key = get_interval_key(date)
-        scene_groups[key].append((coverage_pct, f))
+        scene_groups[key].append((coverage_pct, date, f))
 
-    selected = [sorted(group, key=lambda x: -x[0])[0][1] for group in scene_groups.values()]
+        # Sort each group by coverage descending, then date ascending; select first
+        selected = []
+        for group in scene_groups.values():
+            group.sort(key=lambda x: (-x[0], x[1]))  # coverage desc, date asc
+            coverage_pct, date, f = group[0]
+            selected.append((f, coverage_pct, date))
+
+
 
     console.print(f"[green]Selected {len(selected)} best scenes ({cadence})[/green]")
-    for f in selected:
-        date = f["properties"]["acquired"][:10]
+    for f, cov, dt in selected:
         thumb = f["_links"].get("thumbnail")
-        console.print(f"{date} | ID: {f['id']} | [link={thumb}]thumbnail[/link]")
+        console.print(f"{dt.date()} | ID: {f['id']} | Coverage: {cov:.2f}% | [link={thumb}]thumbnail[/link]")
 
-    ids = ",".join([f["id"] for f in selected])
+    # Print the total sqkm covered by this order and ask the user if they want to proceed
+    console.print(f"[blue]Total quota used in this order: {aoi_area_sqkm * len(selected):.2f} sq km[/blue]")
+
+    ids = ",".join([f["id"] for f, _, _ in selected])
     console.print(f"\nUse this to order: [bold blue]--scene-ids {ids}[/bold blue]")
 
 
@@ -954,7 +1017,10 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
         # Read shapefile
         gdf = gpd.read_file(shp)
         gdf = gdf.to_crs(epsg=4326)
-        
+        original_crs = gdf.crs
+        # Prepare equal-area CRS for accurate area calculations
+        equal_area_crs = "EPSG:6933"
+
         console.print(f"[bold blue]📂 Loaded shapefile with {len(gdf)} features[/bold blue]")
         console.print(f"[dim]Columns: {', '.join(gdf.columns.tolist())}[/dim]")
         
@@ -1023,12 +1089,12 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
             product_bundle = bundle
             console.print(f"\n[✅] Using override bundle: {product_bundle}")
         elif num_bands == "four_bands":
-            product_bundle = "analytic_sr_udm2"
+            product_bundle = "ortho_analytic_4b_sr"
             console.print(f"\n[✅] Using 4-band surface reflectance: {product_bundle}")
         else:
             # For 8-band, use the earliest year to determine bundle
             earliest_year = min(int(o["start_date"].split('-')[0]) for o in all_orders)
-            product_bundle = "analytic_8b_sr_udm2" if earliest_year >= 2022 else "analytic_sr_udm2"
+            product_bundle = "ortho_analytic_8b_sr" if earliest_year >= 2021 else "ortho_analytic_4b_sr"
             console.print(f"\n[✅] Using 8-band surface reflectance: {product_bundle}")
         
         # Process orders
@@ -1052,9 +1118,9 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
             aoi_geom = geom
             aoi_geojson = aoi_geom.__geo_interface__
             
-            # Calculate area (approximate, in sq km)
-            # For more accurate area, would need to project to a local CRS
-            aoi_area_sqkm = geom.area * 111.32 * 111.32  # Rough approximation at equator
+            geom_equal_area = gpd.GeoSeries([geom], crs=original_crs).to_crs(equal_area_crs)
+            aoi_area_sqkm = geom_equal_area.area.iloc[0] / 1e6  # m² → km²
+
             
             result = submit_single_order(
                 aoi_geom=aoi_geom,
@@ -1109,7 +1175,7 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
         if results["failed"]:
             console.print(f"[red]Failed: {len(results['failed'])} orders[/red]")
             for item in results["failed"]:
-                console.print(f"  - {item['gage_id']}: {item.get('error', 'Unknown')[:60]}")
+                console.print(f"  - {item['gage_id']}: {item.get('error', 'Unknown')}")
         
         if not dry_run and results["submitted"]:
             console.print(f"\n[bold green]🎉 Successfully submitted {len(results['submitted'])} orders![/bold green]")
