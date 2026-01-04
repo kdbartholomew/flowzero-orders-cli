@@ -9,7 +9,8 @@ This CLI streamlines the process of:
 - Ordering PlanetScope imagery with automatic scene selection
 - Ordering Planet Basemap composites
 - Batch ordering multiple AOIs with per-gage date ranges
-- Uploading completed orders to S3 for downstream processing
+- Checking order status and downloading completed orders
+- Uploading to S3 or saving locally with quota tracking
 
 ## Installation
 
@@ -87,13 +88,13 @@ python main.py submit \
 
 **Scene Selection Logic:**
 - Filters for 0% cloud cover
-- Requires ≥99% AOI coverage
+- Requires ≥98% AOI coverage
 - Selects best scene per cadence interval
 
 ---
 
-### `batch-submit` ⭐ NEW
-Submit multiple PlanetScope orders from a single shapefile containing multiple AOIs with per-gage date ranges.
+### `batch-submit`
+Submit multiple PlanetScope orders from a single shapefile containing multiple AOIs with per-gage date ranges. Shows quota usage per order and in the summary.
 
 ```bash
 python main.py batch-submit \
@@ -124,38 +125,36 @@ python main.py batch-submit \
 - End date column (YYYY-MM-DD format)
 
 **Automatic Date Subdivision:**
-Date ranges longer than `--max-months` (default 6) are automatically split into multiple orders. For example, a 2-year date range becomes four orders: 6 months each.
+Date ranges longer than `--max-months` (default 6) are automatically split into multiple orders. For example, a 2-year date range becomes four 6-month orders.
 
-**Example Output:**
+**Example Output with Quota Tracking:**
 ```
 📂 Loaded shapefile with 5 features
 Columns: gage_id, start_date, end_date, geometry
 
 📋 Prepared 8 orders from 5 gages
 
-Order Summary:
-  • Gage_001: 2 orders (date range subdivided)
-  • Gage_002: 1 order
-  • Gage_003: 2 orders (date range subdivided)
-  • Gage_004: 1 order
-  • Gage_005: 2 orders (date range subdivided)
+📦 Batch ID: abc123-def4-5678-9012-34567890abcd
 
-[✅] Using 4-band surface reflectance: analytic_sr_udm2
+[✅] Using 4-band surface reflectance: ortho_analytic_4b_sr
 
 Processing orders...
 
-[1/8] Gage_001: 2024-01-01 to 2024-06-30... ✓ Order a1b2c3d4... (12 scenes)
-[2/8] Gage_001: 2024-07-01 to 2024-12-31... ✓ Order e5f6g7h8... (10 scenes)
+[1/8] Gage_001: 2024-01-01 to 2024-06-30... ✓ Order a1b2c3d4... (23 scenes, 1,840 ha quota)
+[2/8] Gage_001: 2024-07-01 to 2024-12-31... ✓ Order e5f6g7h8... (19 scenes, 1,520 ha quota)
+[3/8] Gage_002: 2024-01-01 to 2024-06-30... ✓ Order i9j0k1l2... (21 scenes, 1,680 ha quota)
 ...
 
 ============================================================
 📊 Batch Order Summary
 ============================================================
-Submitted: 7 orders
+Submitted: 7 orders (152 scenes, 12,160 ha quota)
 No valid scenes: 1 orders
   - Gage_004: 2024-06-01 to 2024-08-31
 
 🎉 Successfully submitted 7 orders!
+📈 Total: 152 scenes, 12,160 hectares of quota
+📦 Batch ID: abc123-def4-5678-9012-34567890abcd
 ```
 
 ---
@@ -177,6 +176,8 @@ python main.py search-scenes \
 | `--start-date` | required | Start date (YYYY-MM-DD) |
 | `--end-date` | required | End date (YYYY-MM-DD) |
 | `--cadence` | `weekly` | `daily`, `weekly`, or `monthly` |
+| `--num-bands` | `four_bands` | `four_bands` or `eight_bands` |
+| `--bundle` | auto | Override product bundle name |
 | `--api-key` | env var | Planet API key |
 
 ---
@@ -214,7 +215,7 @@ python main.py order-basemap \
 ---
 
 ### `check-order-status`
-Check an order's status and upload completed files to S3.
+Check a single order's status and upload completed files to S3.
 
 ```bash
 python main.py check-order-status <order_id>
@@ -228,8 +229,8 @@ When an order is complete (`success` state), this command:
 
 ---
 
-### `batch-check-status` ⭐ NEW
-Check status and download all orders in a batch by batch_id.
+### `batch-check-status`
+Check status and download all orders in a batch. Supports both S3 and local output, with smart download-once behavior.
 
 ```bash
 python main.py batch-check-status <batch_id> --api-key API_KEY
@@ -240,25 +241,60 @@ python main.py batch-check-status <batch_id> --api-key API_KEY
 | `batch_id` | required | Batch ID from batch-submit output |
 | `--api-key` | env var | Planet API Key |
 | `--skip-completed` | false | Skip orders already in 'success' state |
+| `--overwrite` | false | Re-download even if already downloaded |
+| `--output` | `s3` | Output location: `s3` or local directory path |
 
-**Usage:**
-1. After running `batch-submit`, note the Batch ID shown in the output
-2. Run `batch-check-status` with that ID to check all orders at once
-3. Use `--skip-completed` on subsequent runs to only process new orders
+**Key Features:**
+- **Download-once**: Orders marked as downloaded in `orders.json` are skipped automatically
+- **File existence check**: Skips files that already exist in S3 or locally
+- **Local or S3 output**: Use `--output ./downloads` to save locally instead of S3
+- **Overwrite mode**: Use `--overwrite` to force re-download of all files
 
-**Example:**
+**Example Usage:**
 ```bash
-# After batch-submit shows: "📦 Batch ID: abc123-def4-5678-..."
+# Default: Check status and upload to S3, skip already-downloaded orders
 python main.py batch-check-status abc123-def4-5678-... --api-key API_KEY
 
-# Later, skip already-completed orders:
-python main.py batch-check-status abc123-def4-5678-... --skip-completed
+# Force re-download even if already downloaded
+python main.py batch-check-status abc123-def4-5678-... --api-key API_KEY --overwrite
+
+# Download to local directory instead of S3
+python main.py batch-check-status abc123-def4-5678-... --api-key API_KEY --output ./downloads
+
+# Combine options: local download with overwrite
+python main.py batch-check-status abc123-def4-5678-... --output ./downloads --overwrite
 ```
 
-**Output:**
-- Shows status for each order in the batch
-- Processes and uploads completed orders automatically
-- Provides summary of completed, pending, and failed orders
+**Example Output:**
+```
+📦 Found 7 orders in batch: abc123-def4-5678-...
+
+[1/7] Checking 08279500 (2022-01-01 to 2022-06-30)...
+  Order ID: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+  [✅] Status: success
+  [🔍] Processing PSScope Order - Organizing by week...
+  [✅] Found 23 images across 23 weeks
+  [⬆️] Uploading: 20220115_abc123.tif -> s3://flowzero/planetscope analytic/four_bands/08279500/2022_01_15_abc123.tiff
+  [✅] Saved successfully
+  ...
+  [✅] Metadata saved to S3
+  [🎉] Order complete!
+
+[2/7] Checking 08279000 (2022-01-01 to 2022-06-30)...
+  Order ID: b2c3d4e5-f6g7-8901-bcde-f23456789012
+  [✅] Status: success
+  [⏭️] Already downloaded (use --overwrite to re-download)
+
+============================================================
+📊 Batch Status Check Summary
+============================================================
+Completed & Uploaded: 5
+Pending (not ready): 1
+  - c3d4e5f6... (running)
+Skipped (already completed): 1
+
+💡 Run again later to check pending orders, or use --skip-completed to only process new ones.
+```
 
 ---
 
@@ -285,19 +321,21 @@ python main.py check-order-status <order_id>
 ```bash
 # 1. Prepare shapefile with columns: gage_id, start_date, end_date, geometry
 
-# 2. Preview orders (dry run)
+# 2. Preview orders (dry run) - shows quota impact
 python main.py batch-submit --shp ./all_gages.shp --dry-run
 
 # 3. Submit all orders
 python main.py batch-submit --shp ./all_gages.shp
+# Note the Batch ID in the output!
 
-# 4. Check all orders in batch (recommended)
+# 4. Check all orders in batch and download to S3
 python main.py batch-check-status <batch_id> --api-key API_KEY
 
-# Or check individual orders
-python main.py check-order-status <order_id_1>
-python main.py check-order-status <order_id_2>
-# ...
+# 5. Later, check again (will skip already-downloaded orders)
+python main.py batch-check-status <batch_id> --api-key API_KEY
+
+# Or download to local directory instead
+python main.py batch-check-status <batch_id> --output ./planet_imagery
 ```
 
 ---
@@ -334,12 +372,23 @@ All orders are logged to `orders.json` with metadata:
   "end_date": "2024-06-30",
   "num_bands": "four_bands",
   "product_bundle": "analytic_sr_udm2",
-  "scenes_selected": 15,
+  "aoi_area_sqkm": 8.5,
+  "scenes_selected": 23,
   "batch_order": true,
   "batch_id": "abc123-def4-5678-9012-34567890abcd",
-  "timestamp": "2024-12-15T10:30:00"
+  "timestamp": "2024-12-15T10:30:00",
+  "downloaded": true,
+  "downloaded_at": "2024-12-16T14:22:00",
+  "download_location": "s3",
+  "files_count": 23
 }
 ```
+
+**Fields added after download:**
+- `downloaded`: Boolean indicating if order has been downloaded
+- `downloaded_at`: ISO timestamp of when download completed
+- `download_location`: Either `"s3"` or local directory path
+- `files_count`: Number of files successfully downloaded
 
 ---
 
@@ -360,35 +409,39 @@ s3://flowzero/
             └── *.tiff
 ```
 
+## Local Output Structure
+
+When using `--output ./downloads`:
+```
+./downloads/
+├── planetscope analytic/
+│   └── four_bands/
+│       └── {aoi_name}/
+│           ├── 2024_01_15_{scene_id}.tiff
+│           ├── 2024_01_22_{scene_id}.tiff
+│           └── metadata.json
+└── basemaps/
+    └── {aoi_name}/
+        └── {year}_{month}/
+            └── *.tiff
+```
+
 ---
 
-## Recent Changes
+## Quota Tracking
 
-### Added: `batch-submit` Command
-- **Purpose**: Submit multiple orders from a single shapefile with per-gage date ranges
-- **Key Features**:
-  - Reads shapefile with gage IDs, geometries, and individual date ranges
-  - Automatically subdivides date ranges into 6-month intervals (configurable)
-  - Progress tracking with success/failure summary
-  - Dry-run mode for previewing without submitting
-  - Configurable column names for flexibility with different shapefile schemas
-  - **Pagination limit detection**: Stops and alerts user if Planet API returns 250 items (limit hit)
+The CLI tracks and displays quota usage to help manage your Planet subscription:
 
-### New Helper Functions
-- `subdivide_date_range()`: Splits long date ranges into manageable chunks
-- `submit_single_order()`: Reusable order submission logic
+- **Per-order**: Shows scenes and hectares for each order submitted
+- **Batch summary**: Shows total scenes and total hectares across all orders
+- **Calculation**: `quota_hectares = aoi_area_sqkm × scenes_selected × 100`
 
-### New Dependency
-- `python-dateutil`: For reliable month-based date arithmetic
-
-### Added: `batch-check-status` Command
-- **Purpose**: Check status and download all orders in a batch by batch_id
-- **Key Features**:
-  - Finds all orders with a given batch_id from orders.json
-  - Processes each order sequentially with progress tracking
-  - Automatically uploads completed orders to S3
-  - `--skip-completed` flag to skip already-processed orders
-  - Summary report of completed, pending, and failed orders
+Example output:
+```
+[1/7] 08279500: 2022-01-01 to 2022-06-30... ✓ Order a1b2c3d4... (23 scenes, 1,955 ha quota)
+...
+📈 Total: 152 scenes, 12,920 hectares of quota
+```
 
 ---
 
@@ -412,9 +465,13 @@ s3://flowzero/
 - Reduce `--max-months` (e.g., `--max-months 3`)
 - Or manually use smaller date ranges
 
+### "Already downloaded (use --overwrite to re-download)"
+- The order was previously downloaded and marked in `orders.json`
+- Use `--overwrite` flag to force re-download
+- Or manually remove the `downloaded` field from the order entry in `orders.json`
+
 ---
 
 ## License
 
 [Add license information]
-
