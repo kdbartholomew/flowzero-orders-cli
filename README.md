@@ -240,8 +240,7 @@ python main.py batch-check-status <batch_id> --api-key API_KEY
 |--------|---------|-------------|
 | `batch_id` | required | Batch ID from batch-submit output |
 | `--api-key` | env var | Planet API Key |
-| `--skip-completed` | false | Skip orders already in 'success' state |
-| `--overwrite` | false | Re-download even if already downloaded |
+| `--overwrite` | false | Re-download even if files already exist |
 | `--output` | `s3` | Output location: `s3` or local directory path |
 
 **Key Features:**

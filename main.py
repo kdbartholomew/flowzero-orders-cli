@@ -683,16 +683,15 @@ def check_order_status(order_id, api_key):
 @cli.command()
 @click.argument("batch_id")
 @click.option("--api-key", default=os.getenv("PL_API_KEY"), help="Planet API Key")
-@click.option("--skip-completed", is_flag=True, help="Skip orders that are already in 'success' state")
-@click.option("--overwrite", is_flag=True, default=False, help="Re-download even if already downloaded (default: skip already downloaded)")
+@click.option("--overwrite", is_flag=True, default=False, help="Re-download even if files already exist (default: skip existing files)")
 @click.option("--output", default="s3", help="Output location: 's3' (default) or local directory path")
-def batch_check_status(batch_id, api_key, skip_completed, overwrite, output):
+def batch_check_status(batch_id, api_key, overwrite, output):
     """
     Check status and download all orders in a batch.
     
     Finds all orders with the given batch_id from orders.json and processes each one.
     
-    By default, orders that have already been downloaded (marked in orders.json) are skipped.
+    By default, files that already exist at the output location are skipped.
     Use --overwrite to re-download them.
     
     Use --output to specify where to save files:
@@ -735,8 +734,7 @@ def batch_check_status(batch_id, api_key, skip_completed, overwrite, output):
     results = {
         "success": [],
         "pending": [],
-        "failed": [],
-        "skipped": []
+        "failed": []
     }
     
     for i, order in enumerate(batch_orders, 1):
@@ -759,11 +757,6 @@ def batch_check_status(batch_id, api_key, skip_completed, overwrite, output):
         order_info = response.json()
         order_state = order_info["state"]
         console.print(f"  [✅] Status: {order_state}")
-        
-        if skip_completed and order_state == "success":
-            console.print(f"  [⏭️] Skipping (already completed)[/⏭️]")
-            results["skipped"].append(order)
-            continue
         
         if order_state != "success":
             console.print(f"  [⏳] Order not ready yet (state: {order_state})[/⏳]")
@@ -950,15 +943,13 @@ def batch_check_status(batch_id, api_key, skip_completed, overwrite, output):
         console.print(f"[yellow]Pending (not ready): {len(results['pending'])}[/yellow]")
         for item in results["pending"]:
             console.print(f"  - {item['order_id'][:8]}... ({item.get('state', 'unknown')})")
-    if results["skipped"]:
-        console.print(f"[dim]Skipped (already completed): {len(results['skipped'])}[/dim]")
     if results["failed"]:
         console.print(f"[red]Failed: {len(results['failed'])}[/red]")
         for item in results["failed"]:
             console.print(f"  - {item.get('order_id', 'unknown')[:8]}...: {item.get('error', 'Unknown')[:50]}")
     
     if results["pending"]:
-        console.print(f"\n[yellow]💡 Run again later to check pending orders, or use --skip-completed to only process new ones.[/yellow]")
+        console.print(f"\n[yellow]💡 Run again later to check pending orders.[/yellow]")
 
 
 @cli.command()
