@@ -245,17 +245,16 @@ python main.py batch-check-status <batch_id> --api-key API_KEY
 | `--output` | `s3` | Output location: `s3` or local directory path |
 
 **Key Features:**
-- **Download-once**: Orders marked as downloaded in `orders.json` are skipped automatically
-- **File existence check**: Skips files that already exist in S3 or locally
+- **Download-once**: Checks if files already exist in S3 or locally before downloading
 - **Local or S3 output**: Use `--output ./downloads` to save locally instead of S3
 - **Overwrite mode**: Use `--overwrite` to force re-download of all files
 
 **Example Usage:**
 ```bash
-# Default: Check status and upload to S3, skip already-downloaded orders
+# Default: Check status and upload to S3, skip files that already exist
 python main.py batch-check-status abc123-def4-5678-... --api-key API_KEY
 
-# Force re-download even if already downloaded
+# Force re-download even if files already exist
 python main.py batch-check-status abc123-def4-5678-... --api-key API_KEY --overwrite
 
 # Download to local directory instead of S3
@@ -276,6 +275,7 @@ python main.py batch-check-status abc123-def4-5678-... --output ./downloads --ov
   [✅] Found 23 images across 23 weeks
   [⬆️] Uploading: 20220115_abc123.tif -> s3://flowzero/planetscope analytic/four_bands/08279500/2022_01_15_abc123.tiff
   [✅] Saved successfully
+  [⏭️] Skipping (exists): s3://flowzero/planetscope analytic/four_bands/08279500/2022_01_22_def456.tiff
   ...
   [✅] Metadata saved to S3
   [🎉] Order complete!
@@ -283,17 +283,20 @@ python main.py batch-check-status abc123-def4-5678-... --output ./downloads --ov
 [2/7] Checking 08279000 (2022-01-01 to 2022-06-30)...
   Order ID: b2c3d4e5-f6g7-8901-bcde-f23456789012
   [✅] Status: success
-  [⏭️] Already downloaded (use --overwrite to re-download)
+  [🔍] Processing PSScope Order - Organizing by week...
+  [✅] Found 19 images across 19 weeks
+  [⏭️] Skipping (exists): s3://flowzero/planetscope analytic/four_bands/08279000/2022_01_08_xyz789.tiff
+  ... (all files already exist)
+  [🎉] Order complete!
 
 ============================================================
 📊 Batch Status Check Summary
 ============================================================
-Completed & Uploaded: 5
+Completed & Uploaded: 6
 Pending (not ready): 1
   - c3d4e5f6... (running)
-Skipped (already completed): 1
 
-💡 Run again later to check pending orders, or use --skip-completed to only process new ones.
+💡 Run again later to check pending orders.
 ```
 
 ---
@@ -376,19 +379,9 @@ All orders are logged to `orders.json` with metadata:
   "scenes_selected": 23,
   "batch_order": true,
   "batch_id": "abc123-def4-5678-9012-34567890abcd",
-  "timestamp": "2024-12-15T10:30:00",
-  "downloaded": true,
-  "downloaded_at": "2024-12-16T14:22:00",
-  "download_location": "s3",
-  "files_count": 23
+  "timestamp": "2024-12-15T10:30:00"
 }
 ```
-
-**Fields added after download:**
-- `downloaded`: Boolean indicating if order has been downloaded
-- `downloaded_at`: ISO timestamp of when download completed
-- `download_location`: Either `"s3"` or local directory path
-- `files_count`: Number of files successfully downloaded
 
 ---
 
@@ -465,10 +458,10 @@ Example output:
 - Reduce `--max-months` (e.g., `--max-months 3`)
 - Or manually use smaller date ranges
 
-### "Already downloaded (use --overwrite to re-download)"
-- The order was previously downloaded and marked in `orders.json`
-- Use `--overwrite` flag to force re-download
-- Or manually remove the `downloaded` field from the order entry in `orders.json`
+### "Skipping (exists)" messages
+- Files that already exist in the output location (S3 or local) are skipped
+- This prevents duplicate downloads and saves time/bandwidth
+- Use `--overwrite` flag to force re-download of all files
 
 ---
 

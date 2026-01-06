@@ -62,29 +62,6 @@ def log_order(order_data):
         json.dump(orders, f, indent=2)
 
 
-def update_order_log(order_id: str, updates: dict):
-    """Update an existing order entry in orders.json with new fields."""
-    if not ORDERS_LOG_FILE.exists():
-        return False
-    try:
-        with ORDERS_LOG_FILE.open("r") as f:
-            orders = json.load(f)
-        
-        updated = False
-        for order in orders:
-            if order.get("order_id") == order_id:
-                order.update(updates)
-                updated = True
-                break
-        
-        if updated:
-            with ORDERS_LOG_FILE.open("w") as f:
-                json.dump(orders, f, indent=2)
-        return updated
-    except (json.JSONDecodeError, IOError):
-        return False
-
-
 def s3_key_exists(bucket: str, key: str) -> bool:
     """Check if a key exists in S3."""
     try:
@@ -793,12 +770,6 @@ def batch_check_status(batch_id, api_key, skip_completed, overwrite, output):
             results["pending"].append({"order_id": order_id, "state": order_state})
             continue
         
-        # Check if already downloaded (skip unless overwrite is True)
-        if order.get("downloaded") and not overwrite:
-            console.print(f"  [⏭️] Already downloaded (use --overwrite to re-download)")
-            results["skipped"].append(order)
-            continue
-        
         # Order is ready - process it (reuse logic from check_order_status)
         aoi_name_normalized = normalize_aoi_name(order.get("aoi_name", "UnknownAOI"))
         mosaic_name = order.get("mosaic_name", "unknown_mosaic")
@@ -822,9 +793,6 @@ def batch_check_status(batch_id, api_key, skip_completed, overwrite, output):
         
         # Process and upload/save files (same logic as check_order_status)
         try:
-            download_success = True
-            files_saved = []
-            
             if order_type == "PSScope" and num_bands == "four_bands":
                 console.print(f"  [🔍] Processing PSScope Order - Organizing by week...")
                 image_metadata = []
@@ -886,18 +854,14 @@ def batch_check_status(batch_id, api_key, skip_completed, overwrite, output):
                                     S3_BUCKET,
                                     s3_key
                                 )
-                                files_saved.append(f"s3://{S3_BUCKET}/{s3_key}")
                             else:
                                 with open(local_path, 'wb') as f:
                                     f.write(r.content)
-                                files_saved.append(str(local_path))
                             console.print(f"  [✅] Saved successfully")
                         except Exception as e:
                             console.print(f"  [❌] Error saving: {str(e)}", style="bold red")
-                            download_success = False
                     else:
                         console.print(f"  [❌] Failed to download: {r.status_code}", style="bold red")
-                        download_success = False
                         
             elif is_basemap or order_type == "Basemap (Composite)":
                 mosaic_parts = mosaic_name.split("_")
@@ -941,18 +905,14 @@ def batch_check_status(batch_id, api_key, skip_completed, overwrite, output):
                                     S3_BUCKET,
                                     s3_key
                                 )
-                                files_saved.append(f"s3://{S3_BUCKET}/{s3_key}")
                             else:
                                 with open(local_path, 'wb') as f:
                                     f.write(r.content)
-                                files_saved.append(str(local_path))
                             console.print(f"  [✅] Saved successfully")
                         except Exception as e:
                             console.print(f"  [❌] Error saving: {str(e)}", style="bold red")
-                            download_success = False
                     else:
                         console.print(f"  [❌] Failed to download: {r.status_code}", style="bold red")
-                        download_success = False
             
             # Save metadata
             metadata_json = json.dumps(order_info, indent=2)
@@ -974,15 +934,6 @@ def batch_check_status(batch_id, api_key, skip_completed, overwrite, output):
                 with open(metadata_local_path, 'w') as f:
                     f.write(metadata_json)
                 console.print(f"  [✅] Metadata saved locally")
-            
-            # Mark order as downloaded in the log
-            if download_success and files_saved:
-                update_order_log(order_id, {
-                    "downloaded": True,
-                    "downloaded_at": datetime.now().isoformat(),
-                    "download_location": "s3" if use_s3 else str(local_output_dir),
-                    "files_count": len(files_saved)
-                })
             
             console.print(f"  [🎉] Order complete!\n")
             results["success"].append(order)
