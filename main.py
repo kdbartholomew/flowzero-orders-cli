@@ -61,6 +61,15 @@ def log_order(order_data):
     with ORDERS_LOG_FILE.open("w") as f:
         json.dump(orders, f, indent=2)
 
+
+def s3_key_exists(bucket: str, key: str) -> bool:
+    """Check if a key exists in S3."""
+    try:
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
+    except:
+        return False
+
 def extract_date_from_filename(filename):
     """Extract the acquisition date from Planet product filename."""
     pattern = r"(\d{4})(\d{2})(\d{2})_"
@@ -218,6 +227,10 @@ def submit_single_order(
     
     item_ids = [f["id"] for f, _, _ in selected]
     
+    # Calculate quota impact (area in sq km * number of scenes = total quota used)
+    quota_sqkm = aoi_area_sqkm * len(selected)
+    quota_hectares = quota_sqkm * 100  # 1 sq km = 100 hectares
+    
     if dry_run:
         return {
             "success": True,
@@ -227,6 +240,9 @@ def submit_single_order(
             "end_date": end_date,
             "scenes_found": len(features),
             "scenes_selected": len(selected),
+            "aoi_area_sqkm": aoi_area_sqkm,
+            "quota_sqkm": quota_sqkm,
+            "quota_hectares": quota_hectares,
             "item_ids": item_ids
         }
     
@@ -272,7 +288,10 @@ def submit_single_order(
             "gage_id": gage_id,
             "start_date": start_date,
             "end_date": end_date,
-            "scenes_selected": len(selected)
+            "scenes_selected": len(selected),
+            "aoi_area_sqkm": aoi_area_sqkm,
+            "quota_sqkm": quota_sqkm,
+            "quota_hectares": quota_hectares
         }
     else:
         return {"success": False, "error": f"Order failed: {response.status_code} - {response.text}"}
@@ -666,12 +685,20 @@ def check_order_status(order_id, api_key):
 @cli.command()
 @click.argument("batch_id")
 @click.option("--api-key", default=os.getenv("PL_API_KEY"), help="Planet API Key")
-@click.option("--skip-completed", is_flag=True, help="Skip orders that are already in 'success' state")
-def batch_check_status(batch_id, api_key, skip_completed):
+@click.option("--overwrite", is_flag=True, default=False, help="Re-download even if files already exist (default: skip existing files)")
+@click.option("--output", default="s3", help="Output location: 's3' (default) or local directory path")
+def batch_check_status(batch_id, api_key, overwrite, output):
     """
     Check status and download all orders in a batch.
     
     Finds all orders with the given batch_id from orders.json and processes each one.
+    
+    By default, files that already exist at the output location are skipped.
+    Use --overwrite to re-download them.
+    
+    Use --output to specify where to save files:
+    - 's3' (default): Upload to S3 bucket
+    - Local path (e.g., './downloads'): Save files locally
     """
     if not api_key:
         console.print("[red]Error: API key is missing. Set PL_API_KEY env var or use --api-key.[/red]")
@@ -709,8 +736,7 @@ def batch_check_status(batch_id, api_key, skip_completed):
     results = {
         "success": [],
         "pending": [],
-        "failed": [],
-        "skipped": []
+        "failed": []
     }
     
     for i, order in enumerate(batch_orders, 1):
@@ -734,11 +760,6 @@ def batch_check_status(batch_id, api_key, skip_completed):
         order_state = order_info["state"]
         console.print(f"  [✅] Status: {order_state}")
         
-        if skip_completed and order_state == "success":
-            console.print(f"  [⏭️] Skipping (already completed)[/⏭️]")
-            results["skipped"].append(order)
-            continue
-        
         if order_state != "success":
             console.print(f"  [⏳] Order not ready yet (state: {order_state})[/⏳]")
             results["pending"].append({"order_id": order_id, "state": order_state})
@@ -759,7 +780,13 @@ def batch_check_status(batch_id, api_key, skip_completed):
             results["failed"].append({"order_id": order_id, "error": "No downloadable files"})
             continue
         
-        # Process and upload files (same logic as check_order_status)
+        # Determine output location
+        use_s3 = output.lower() == "s3"
+        if not use_s3:
+            local_output_dir = Path(output)
+            local_output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Process and upload/save files (same logic as check_order_status)
         try:
             if order_type == "PSScope" and num_bands == "four_bands":
                 console.print(f"  [🔍] Processing PSScope Order - Organizing by week...")
@@ -791,61 +818,118 @@ def batch_check_status(batch_id, api_key, skip_completed):
                     if week not in weeks:
                         weeks[week] = img
                 console.print(f"  [✅] Found {len(image_metadata)} images across {len(weeks)} weeks")
-                s3_path_prefix = f"planetscope analytic/four_bands/{aoi_name_normalized}"
+                
+                relative_path = f"planetscope analytic/four_bands/{aoi_name_normalized}"
+                
                 for week, img in weeks.items():
-                    s3_key = f"{s3_path_prefix}/{img['date']}_{img['scene_id']}.tiff"
-                    console.print(f"  [⬆️] Uploading: {img['filename']} -> s3://{S3_BUCKET}/{s3_key}")
+                    target_filename = f"{img['date']}_{img['scene_id']}.tiff"
+                    
+                    if use_s3:
+                        s3_key = f"{relative_path}/{target_filename}"
+                        # Check if file already exists in S3 (unless overwriting)
+                        if not overwrite and s3_key_exists(S3_BUCKET, s3_key):
+                            console.print(f"  [⏭️] Skipping (exists): s3://{S3_BUCKET}/{s3_key}")
+                            continue
+                        console.print(f"  [⬆️] Uploading: {img['filename']} -> s3://{S3_BUCKET}/{s3_key}")
+                    else:
+                        local_path = local_output_dir / relative_path / target_filename
+                        # Check if file already exists locally (unless overwriting)
+                        if not overwrite and local_path.exists():
+                            console.print(f"  [⏭️] Skipping (exists): {local_path}")
+                            continue
+                        local_path.parent.mkdir(parents=True, exist_ok=True)
+                        console.print(f"  [⬇️] Downloading: {img['filename']} -> {local_path}")
+                    
                     r = requests.get(img['url'], stream=True)
                     if r.status_code == 200:
                         try:
-                            s3.upload_fileobj(
-                                io.BytesIO(r.content),
-                                S3_BUCKET,
-                                s3_key
-                            )
-                            console.print(f"  [✅] Uploaded successfully")
+                            if use_s3:
+                                s3.upload_fileobj(
+                                    io.BytesIO(r.content),
+                                    S3_BUCKET,
+                                    s3_key
+                                )
+                            else:
+                                with open(local_path, 'wb') as f:
+                                    f.write(r.content)
+                            console.print(f"  [✅] Saved successfully")
                         except Exception as e:
-                            console.print(f"  [❌] Error uploading: {str(e)}", style="bold red")
+                            console.print(f"  [❌] Error saving: {str(e)}", style="bold red")
                     else:
                         console.print(f"  [❌] Failed to download: {r.status_code}", style="bold red")
+                        
             elif is_basemap or order_type == "Basemap (Composite)":
                 mosaic_parts = mosaic_name.split("_")
                 if len(mosaic_parts) >= 4 and len(mosaic_parts[2]) == 4:
                     mosaic_date = f"{mosaic_parts[2]}_{mosaic_parts[3]}"
                 else:
                     mosaic_date = "unknown_date"
-                s3_path_prefix = f"basemaps/{aoi_name_normalized}/{mosaic_date}"
-                console.print(f"  [⬆️] Uploading Basemap files to s3://{S3_BUCKET}/{s3_path_prefix}")
+                    
+                relative_path = f"basemaps/{aoi_name_normalized}/{mosaic_date}"
+                
+                if use_s3:
+                    console.print(f"  [⬆️] Uploading Basemap files to s3://{S3_BUCKET}/{relative_path}")
+                else:
+                    console.print(f"  [⬇️] Downloading Basemap files to {local_output_dir / relative_path}")
+                
                 for link in download_links:
                     filename = Path(link.get("name", "")).name
-                    s3_key = f"{s3_path_prefix}/{filename}"
-                    console.print(f"  [⬆️] Uploading: {filename}")
+                    
+                    if use_s3:
+                        s3_key = f"{relative_path}/{filename}"
+                        # Check if file already exists in S3 (unless overwriting)
+                        if not overwrite and s3_key_exists(S3_BUCKET, s3_key):
+                            console.print(f"  [⏭️] Skipping (exists): s3://{S3_BUCKET}/{s3_key}")
+                            continue
+                        console.print(f"  [⬆️] Uploading: {filename}")
+                    else:
+                        local_path = local_output_dir / relative_path / filename
+                        # Check if file already exists locally (unless overwriting)
+                        if not overwrite and local_path.exists():
+                            console.print(f"  [⏭️] Skipping (exists): {local_path}")
+                            continue
+                        local_path.parent.mkdir(parents=True, exist_ok=True)
+                        console.print(f"  [⬇️] Downloading: {filename}")
+                    
                     r = requests.get(link.get('location'), stream=True)
                     if r.status_code == 200:
                         try:
-                            s3.upload_fileobj(
-                                io.BytesIO(r.content),
-                                S3_BUCKET,
-                                s3_key
-                            )
-                            console.print(f"  [✅] Uploaded successfully")
+                            if use_s3:
+                                s3.upload_fileobj(
+                                    io.BytesIO(r.content),
+                                    S3_BUCKET,
+                                    s3_key
+                                )
+                            else:
+                                with open(local_path, 'wb') as f:
+                                    f.write(r.content)
+                            console.print(f"  [✅] Saved successfully")
                         except Exception as e:
-                            console.print(f"  [❌] Error uploading: {str(e)}", style="bold red")
+                            console.print(f"  [❌] Error saving: {str(e)}", style="bold red")
                     else:
                         console.print(f"  [❌] Failed to download: {r.status_code}", style="bold red")
             
             # Save metadata
             metadata_json = json.dumps(order_info, indent=2)
             if is_basemap or order_type == "Basemap (Composite)":
-                s3_metadata_path = f"basemaps/{aoi_name_normalized}/{mosaic_date}/metadata.json"
+                metadata_relative_path = f"basemaps/{aoi_name_normalized}/{mosaic_date}/metadata.json"
             else:
-                s3_metadata_path = f"planetscope analytic/four_bands/{aoi_name_normalized}/metadata.json"
-            s3.put_object(
-                Body=metadata_json,
-                Bucket=S3_BUCKET,
-                Key=s3_metadata_path
-            )
-            console.print(f"  [✅] Metadata saved to S3")
+                metadata_relative_path = f"planetscope analytic/four_bands/{aoi_name_normalized}/metadata.json"
+            
+            if use_s3:
+                s3.put_object(
+                    Body=metadata_json,
+                    Bucket=S3_BUCKET,
+                    Key=metadata_relative_path
+                )
+                console.print(f"  [✅] Metadata saved to S3")
+            else:
+                metadata_local_path = local_output_dir / metadata_relative_path
+                metadata_local_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(metadata_local_path, 'w') as f:
+                    f.write(metadata_json)
+                console.print(f"  [✅] Metadata saved locally")
+            
             console.print(f"  [🎉] Order complete!\n")
             results["success"].append(order)
         except Exception as e:
@@ -861,15 +945,13 @@ def batch_check_status(batch_id, api_key, skip_completed):
         console.print(f"[yellow]Pending (not ready): {len(results['pending'])}[/yellow]")
         for item in results["pending"]:
             console.print(f"  - {item['order_id'][:8]}... ({item.get('state', 'unknown')})")
-    if results["skipped"]:
-        console.print(f"[dim]Skipped (already completed): {len(results['skipped'])}[/dim]")
     if results["failed"]:
         console.print(f"[red]Failed: {len(results['failed'])}[/red]")
         for item in results["failed"]:
             console.print(f"  - {item.get('order_id', 'unknown')[:8]}...: {item.get('error', 'Unknown')[:50]}")
     
     if results["pending"]:
-        console.print(f"\n[yellow]💡 Run again later to check pending orders, or use --skip-completed to only process new ones.[/yellow]")
+        console.print(f"\n[yellow]💡 Run again later to check pending orders.[/yellow]")
 
 
 @cli.command()
@@ -1150,10 +1232,12 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
             )
             
             if result.get("success"):
+                scenes = result.get('scenes_selected', 0)
+                quota_ha = result.get('quota_hectares', 0)
                 if dry_run:
-                    console.print(f"[green]✓ Would submit ({result.get('scenes_selected', 0)} scenes)[/green]")
+                    console.print(f"[green]✓ Would submit ({scenes} scenes, {quota_ha:,.0f} ha quota)[/green]")
                 else:
-                    console.print(f"[green]✓ Order {result['order_id'][:8]}... ({result.get('scenes_selected', 0)} scenes)[/green]")
+                    console.print(f"[green]✓ Order {result['order_id'][:8]}... ({scenes} scenes, {quota_ha:,.0f} ha quota)[/green]")
                 results["submitted"].append(result)
             elif result.get("pagination_limit_hit"):
                 console.print(f"[bold red]✗ PAGINATION LIMIT HIT[/bold red]")
@@ -1174,10 +1258,14 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
         console.print("[bold]📊 Batch Order Summary[/bold]")
         console.print("="*60)
         
+        # Calculate totals for submitted orders
+        total_scenes = sum(r.get('scenes_selected', 0) for r in results['submitted'])
+        total_quota_hectares = sum(r.get('quota_hectares', 0) for r in results['submitted'])
+        
         if dry_run:
-            console.print(f"[green]Would submit: {len(results['submitted'])} orders[/green]")
+            console.print(f"[green]Would submit: {len(results['submitted'])} orders ({total_scenes} scenes, {total_quota_hectares:,.0f} ha quota)[/green]")
         else:
-            console.print(f"[green]Submitted: {len(results['submitted'])} orders[/green]")
+            console.print(f"[green]Submitted: {len(results['submitted'])} orders ({total_scenes} scenes, {total_quota_hectares:,.0f} ha quota)[/green]")
         
         if results["no_scenes"]:
             console.print(f"[yellow]No valid scenes: {len(results['no_scenes'])} orders[/yellow]")
@@ -1191,6 +1279,7 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
         
         if not dry_run and results["submitted"]:
             console.print(f"\n[bold green]🎉 Successfully submitted {len(results['submitted'])} orders![/bold green]")
+            console.print(f"[bold blue]📈 Total: {total_scenes} scenes, {total_quota_hectares:,.0f} hectares of quota[/bold blue]")
             console.print(f"[bold cyan]📦 Batch ID: {batch_id}[/bold cyan]")
             console.print(f"[dim]Check all orders in this batch: python main.py batch-check-status {batch_id}[/dim]")
             console.print("[dim]Or check individual orders: check-order-status <order_id>[/dim]")
