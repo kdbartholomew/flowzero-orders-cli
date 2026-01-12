@@ -286,6 +286,7 @@ def submit_single_order(
             "gage_id": gage_id,
             "start_date": start_date,
             "end_date": end_date,
+            "scenes_found": len(features),
             "scenes_selected": len(selected),
             "aoi_area_sqkm": aoi_area_sqkm,
             "quota_sqkm": quota_sqkm,
@@ -1220,12 +1221,13 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
             )
             
             if result.get("success"):
-                scenes = result.get('scenes_selected', 0)
+                scenes_found = result.get('scenes_found', 0)
+                scenes_selected = result.get('scenes_selected', 0)
                 quota_ha = result.get('quota_hectares', 0)
                 if dry_run:
-                    console.print(f"[green]✓ Would submit ({scenes} scenes, {quota_ha:,.0f} ha quota)[/green]")
+                    console.print(f"[green]✓ Would submit ({scenes_found} found, {scenes_selected} selected, {quota_ha:,.0f} ha quota)[/green]")
                 else:
-                    console.print(f"[green]✓ Order {result['order_id'][:8]}... ({scenes} scenes, {quota_ha:,.0f} ha quota)[/green]")
+                    console.print(f"[green]✓ Order {result['order_id'][:8]}... ({scenes_found} found, {scenes_selected} selected, {quota_ha:,.0f} ha quota)[/green]")
                 results["submitted"].append(result)
             elif result.get("pagination_limit_hit"):
                 console.print(f"[bold red]✗ PAGINATION LIMIT HIT[/bold red]")
@@ -1247,13 +1249,14 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
         console.print("="*60)
         
         # Calculate totals for submitted orders
-        total_scenes = sum(r.get('scenes_selected', 0) for r in results['submitted'])
+        total_scenes_found = sum(r.get('scenes_found', 0) for r in results['submitted'])
+        total_scenes_selected = sum(r.get('scenes_selected', 0) for r in results['submitted'])
         total_quota_hectares = sum(r.get('quota_hectares', 0) for r in results['submitted'])
         
         if dry_run:
-            console.print(f"[green]Would submit: {len(results['submitted'])} orders ({total_scenes} scenes, {total_quota_hectares:,.0f} ha quota)[/green]")
+            console.print(f"[green]Would submit: {len(results['submitted'])} orders ({total_scenes_found} found, {total_scenes_selected} selected, {total_quota_hectares:,.0f} ha quota)[/green]")
         else:
-            console.print(f"[green]Submitted: {len(results['submitted'])} orders ({total_scenes} scenes, {total_quota_hectares:,.0f} ha quota)[/green]")
+            console.print(f"[green]Submitted: {len(results['submitted'])} orders ({total_scenes_found} found, {total_scenes_selected} selected, {total_quota_hectares:,.0f} ha quota)[/green]")
         
         if results["no_scenes"]:
             console.print(f"[yellow]No valid scenes: {len(results['no_scenes'])} orders[/yellow]")
@@ -1267,7 +1270,7 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
         
         if not dry_run and results["submitted"]:
             console.print(f"\n[bold green]🎉 Successfully submitted {len(results['submitted'])} orders![/bold green]")
-            console.print(f"[bold blue]📈 Total: {total_scenes} scenes, {total_quota_hectares:,.0f} hectares of quota[/bold blue]")
+            console.print(f"[bold blue]📈 Total: {total_scenes_found} found, {total_scenes_selected} selected, {total_quota_hectares:,.0f} hectares of quota[/bold blue]")
             console.print(f"[bold cyan]📦 Batch ID: {batch_id}[/bold cyan]")
             console.print(f"[dim]Check all orders in this batch: python main.py batch-check-status {batch_id}[/dim]")
             console.print("[dim]Or check individual orders: check-order-status <order_id>[/dim]")
