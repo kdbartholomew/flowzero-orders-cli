@@ -12,6 +12,12 @@ This CLI streamlines the process of:
 - Checking order status and downloading completed orders
 - Uploading to S3 or saving locally with quota tracking
 
+**Key Features:**
+- **Automatic pagination handling** - Fetches all scenes across multiple API pages automatically
+- **Smart download-once** - Skips files that already exist (S3 or local)
+- **Quota tracking** - Shows scenes found vs selected and total quota impact
+- **Flexible output** - Download to S3 or local directory
+
 ## Installation
 
 ### Prerequisites
@@ -127,6 +133,9 @@ python main.py batch-submit \
 **Automatic Date Subdivision:**
 Date ranges longer than `--max-months` (default 6) are automatically split into multiple orders. For example, a 2-year date range becomes four 6-month orders.
 
+**Automatic Pagination Handling:**
+The CLI automatically handles Planet API pagination, fetching all available scenes across multiple pages. You no longer need to worry about the 250-item per-page limit - the tool will fetch all matching scenes automatically.
+
 **Example Output with Quota Tracking:**
 ```
 📂 Loaded shapefile with 5 features
@@ -140,20 +149,20 @@ Columns: gage_id, start_date, end_date, geometry
 
 Processing orders...
 
-[1/8] Gage_001: 2024-01-01 to 2024-06-30... ✓ Order a1b2c3d4... (23 scenes, 1,840 ha quota)
-[2/8] Gage_001: 2024-07-01 to 2024-12-31... ✓ Order e5f6g7h8... (19 scenes, 1,520 ha quota)
-[3/8] Gage_002: 2024-01-01 to 2024-06-30... ✓ Order i9j0k1l2... (21 scenes, 1,680 ha quota)
+[1/8] Gage_001: 2024-01-01 to 2024-06-30... ✓ Order a1b2c3d4... (45 found, 23 selected, 1,840 ha quota)
+[2/8] Gage_001: 2024-07-01 to 2024-12-31... ✓ Order e5f6g7h8... (38 found, 19 selected, 1,520 ha quota)
+[3/8] Gage_002: 2024-01-01 to 2024-06-30... ✓ Order i9j0k1l2... (42 found, 21 selected, 1,680 ha quota)
 ...
 
 ============================================================
 📊 Batch Order Summary
 ============================================================
-Submitted: 7 orders (152 scenes, 12,160 ha quota)
+Submitted: 7 orders (315 found, 152 selected, 12,160 ha quota)
 No valid scenes: 1 orders
   - Gage_004: 2024-06-01 to 2024-08-31
 
 🎉 Successfully submitted 7 orders!
-📈 Total: 152 scenes, 12,160 hectares of quota
+📈 Total: 315 found, 152 selected, 12,160 hectares of quota
 📦 Batch ID: abc123-def4-5678-9012-34567890abcd
 ```
 
@@ -424,15 +433,19 @@ When using `--output ./downloads`:
 
 The CLI tracks and displays quota usage to help manage your Planet subscription:
 
-- **Per-order**: Shows scenes and hectares for each order submitted
-- **Batch summary**: Shows total scenes and total hectares across all orders
+- **Per-order**: Shows scenes found, scenes selected, and hectares for each order submitted
+- **Batch summary**: Shows total scenes found, total scenes selected, and total hectares across all orders
 - **Calculation**: `quota_hectares = aoi_area_sqkm × scenes_selected × 100`
+
+**Scene Counts Explained:**
+- **Found**: Total scenes returned by Planet API (after cloud cover filtering)
+- **Selected**: Final scenes selected after coverage filtering (≥98%) and cadence selection
 
 Example output:
 ```
-[1/7] 08279500: 2022-01-01 to 2022-06-30... ✓ Order a1b2c3d4... (23 scenes, 1,955 ha quota)
+[1/7] 08279500: 2022-01-01 to 2022-06-30... ✓ Order a1b2c3d4... (45 found, 23 selected, 1,955 ha quota)
 ...
-📈 Total: 152 scenes, 12,920 hectares of quota
+📈 Total: 315 found, 152 selected, 12,920 hectares of quota
 ```
 
 ---
@@ -448,14 +461,14 @@ Example output:
 - Consider splitting into smaller AOIs
 
 ### Date range subdivision
-- Orders are limited to 6 months by default to avoid Planet API pagination limits
-- Planet's quick-search API returns max 250 items per request
-- If you hit the pagination limit, reduce `--max-months` (try 3 or less)
+- Orders are limited to 6 months by default for organizational purposes
+- The CLI automatically handles pagination, so you can use larger date ranges if needed
+- However, smaller date ranges (3-6 months) are still recommended for better organization and faster processing
 
-### "Pagination limit hit: 250 scenes returned"
-- Your date range is too large for the AOI
-- Reduce `--max-months` (e.g., `--max-months 3`)
-- Or manually use smaller date ranges
+### Automatic Pagination
+- The CLI automatically fetches all scenes across multiple API pages
+- No manual intervention needed - pagination is handled transparently
+- Large date ranges may take longer to process as more pages are fetched
 
 ### "Skipping (exists)" messages
 - Files that already exist in the output location (S3 or local) are skipped

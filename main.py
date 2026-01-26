@@ -5,6 +5,7 @@ import re
 import io
 import mimetypes
 import uuid
+import time
 from pathlib import Path
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
@@ -69,6 +70,46 @@ def s3_key_exists(bucket: str, key: str) -> bool:
         return True
     except:
         return False
+
+
+def fetch_all_search_results(search_url: str, search_payload: dict, api_key: str, search_headers: dict) -> List[dict]:
+    """
+    Fetch all search results from Planet API, handling pagination.
+    
+    Returns a list of all features from all pages.
+    """
+    all_features = []
+    current_url = search_url
+    current_payload = search_payload
+    is_first_request = True
+    
+    while True:
+        if is_first_request:
+            # First request uses POST with payload
+            response = requests.post(current_url, json=current_payload, auth=(api_key, ""), headers=search_headers)
+            is_first_request = False
+        else:
+            # Subsequent pagination requests use GET
+            response = requests.get(current_url, auth=(api_key, ""), headers=search_headers)
+        
+        if response.status_code != 200:
+            raise Exception(f"Search failed: {response.status_code} - {response.text}")
+        
+        data = response.json()
+        features = data.get("features", [])
+        all_features.extend(features)
+        
+        # Check for next page
+        links = data.get("_links", {})
+        if "next" in links:
+            current_url = links["next"]
+            # Small delay to be respectful to API
+            time.sleep(0.5)
+        else:
+            # No more pages
+            break
+    
+    return all_features
 
 def extract_date_from_filename(filename):
     """Extract the acquisition date from Planet product filename."""
@@ -173,23 +214,15 @@ def submit_single_order(
     }
     
     search_headers = {"Content-Type": "application/json"}
-    search_response = requests.post(search_url, json=search_payload, auth=(api_key, ""), headers=search_headers)
     
-    if search_response.status_code != 200:
-        return {"success": False, "error": f"Search failed: {search_response.text}"}
+    # Fetch all results with pagination
+    try:
+        features = fetch_all_search_results(search_url, search_payload, api_key, search_headers)
+    except Exception as e:
+        return {"success": False, "error": str(e)}
     
-    features = search_response.json().get("features", [])
     if not features:
         return {"success": False, "error": "No cloud-free scenes found", "scenes_found": 0}
-    
-    # Check for Planet API pagination limit (250 items)
-    if len(features) >= 250:
-        return {
-            "success": False, 
-            "error": f"Pagination limit hit: {len(features)} scenes returned. Please reduce date range (try --max-months 3 or smaller intervals).",
-            "scenes_found": len(features),
-            "pagination_limit_hit": True
-        }
     
     def get_interval_key(date_obj):
         if cadence == "daily":
@@ -396,23 +429,17 @@ def submit(geojson, start_date, end_date, num_bands, api_key, bundle, cadence):
         }
 
         search_headers = {"Content-Type": "application/json"}
-        search_response = requests.post(search_url, json=search_payload, auth=(api_key, ""), headers=search_headers)
-
-        if search_response.status_code != 200:
-            console.print(f"❌ Failed to search for scenes: {search_response.text}", style="bold red")
+        
+        # Fetch all results with pagination
+        try:
+            features = fetch_all_search_results(search_url, search_payload, api_key, search_headers)
+        except Exception as e:
+            console.print(f"❌ Failed to search for scenes: {str(e)}", style="bold red")
             return
 
-        features = search_response.json().get("features", [])
         if not features:
             console.print("[yellow]No cloud-free PlanetScope scenes found.[/yellow]")
             return
-
-        # Check for Planet API pagination limit (250 items)
-        if len(features) >= 250:
-            console.print(f"[bold red]❌ Pagination limit hit: {len(features)} scenes returned.[/bold red]")
-            console.print("[yellow]Planet API limits search results to 250 items per request.[/yellow]")
-            console.print("[yellow]Please reduce your date range and try again (e.g., use 3-month intervals).[/yellow]")
-            sys.exit(1)
 
         def get_interval_key(date_obj):
             if cadence == "daily":
@@ -1002,29 +1029,21 @@ def search_scenes(geojson, start_date, end_date, num_bands, bundle, cadence, api
         }
     }
 
-    response = requests.post(
-        "https://api.planet.com/data/v1/quick-search",
-        json=payload,
-        auth=(api_key, ""),
-        headers={"Content-Type": "application/json"}
-    )
-    if response.status_code != 200:
-        console.print(f"[red]Search failed: {response.status_code} {response.text}[/red]")
+    search_url = "https://api.planet.com/data/v1/quick-search"
+    search_headers = {"Content-Type": "application/json"}
+    
+    # Fetch all results with pagination
+    try:
+        features = fetch_all_search_results(search_url, payload, api_key, search_headers)
+    except Exception as e:
+        console.print(f"[red]Search failed: {str(e)}[/red]")
         return
 
-    features = response.json().get("features", [])
     if not features:
         console.print("[yellow]No scenes found.[/yellow]")
         return
-
-    # Check for Planet API pagination limit (250 items)
-    if len(features) >= 250:
-        console.print(f"[bold red]❌ Pagination limit hit: {len(features)} scenes returned.[/bold red]")
-        console.print("[yellow]Planet API limits search results to 250 items per request.[/yellow]")
-        console.print("[yellow]Please reduce your date range and try again (e.g., use 3-month intervals).[/yellow]")
-        return
-    else:
-        console.print(f"[✓] Found {len(features)} scenes matching initial criteria.", style="bold blue")
+    
+    console.print(f"[✓] Found {len(features)} scenes matching initial criteria.", style="bold blue")
 
     def get_interval_key(date_obj):
         if cadence == "daily":
@@ -1241,13 +1260,6 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
                 else:
                     console.print(f"[green]✓ Order {result['order_id'][:8]}... ({scenes_found} found, {scenes_selected} selected, {quota_ha:,.0f} ha quota)[/green]")
                 results["submitted"].append(result)
-            elif result.get("pagination_limit_hit"):
-                console.print(f"[bold red]✗ PAGINATION LIMIT HIT[/bold red]")
-                console.print(f"[yellow]  → Reduce --max-months (currently {max_months}) or use smaller date ranges[/yellow]")
-                results["failed"].append({**order, **result})
-                # Stop processing - user needs to fix the interval size
-                console.print(f"\n[bold red]⛔ Stopping batch processing. Please reduce --max-months and retry.[/bold red]")
-                break
             elif "No cloud-free" in result.get("error", "") or "No full-coverage" in result.get("error", ""):
                 console.print(f"[yellow]⚠ No valid scenes[/yellow]")
                 results["no_scenes"].append({**order, **result})
