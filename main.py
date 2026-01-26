@@ -142,6 +142,7 @@ def submit_single_order(
     gage_id: str,
     num_bands: str,
     product_bundle: str,
+    product_bundle_order: str,
     cadence: str,
     api_key: str,
     dry_run: bool = False,
@@ -252,7 +253,7 @@ def submit_single_order(
         "products": [{
             "item_ids": item_ids,
             "item_type": "PSScene",
-            "product_bundle": product_bundle
+            "product_bundle": product_bundle_order
         }],
         "tools": [
             {"clip": {"aoi": aoi_geojson}}
@@ -271,6 +272,7 @@ def submit_single_order(
             "end_date": end_date,
             "num_bands": num_bands,
             "product_bundle": product_bundle,
+            "product_bundle_order": product_bundle_order,
             "clipped": True,
             "aoi_area_sqkm": aoi_area_sqkm,
             "scenes_selected": len(selected),
@@ -293,7 +295,7 @@ def submit_single_order(
             "quota_hectares": quota_hectares
         }
     else:
-        return {"success": False, "error": f"Order failed: {response.status_code} - {response.text[:200]}"}
+        return {"success": False, "error": f"Order failed: {response.status_code} - {response.text}"}
 
 # --- CLI Commands ---
 
@@ -1176,9 +1178,18 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
             console.print(f"\n[✅] Using 4-band surface reflectance: {product_bundle}")
         else:
             # For 8-band, use the earliest year to determine bundle
+            #TODO: Fix handling of 8-band data to return error if user requests 8-band but dates are before 2021
             earliest_year = min(int(o["start_date"].split('-')[0]) for o in all_orders)
             product_bundle = "ortho_analytic_8b_sr" if earliest_year >= 2021 else "ortho_analytic_4b_sr"
             console.print(f"\n[✅] Using 8-band surface reflectance: {product_bundle}")
+
+        # Cross walk product bundle for ordering
+        if product_bundle == "ortho_analytic_4b_sr":
+            product_bundle_order = "analytic_sr_udm2"
+        elif product_bundle == "ortho_analytic_8b_sr":
+            product_bundle_order = "analytic_8b_sr_udm2"
+        else:
+            product_bundle_order = product_bundle
         
         # Process orders
         results = {
@@ -1214,6 +1225,7 @@ def batch_submit(shp, gage_id_col, start_date_col, end_date_col, num_bands, api_
                 gage_id=gage_id,
                 num_bands=num_bands,
                 product_bundle=product_bundle,
+                product_bundle_order=product_bundle_order,
                 cadence=cadence,
                 api_key=api_key,
                 dry_run=dry_run,
