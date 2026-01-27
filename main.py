@@ -101,12 +101,16 @@ def fetch_all_search_results(search_url: str, search_payload: dict, api_key: str
         all_features.extend(features)
         
         # Follow pagination - Planet API uses "_next" (with underscore) in _links
-        if "_links" in data and "_next" in data["_links"]:
-            current_url = data["_links"]["_next"]
+        # Check if _next exists and is not None (JSON null becomes Python None)
+        links = data.get("_links", {})
+        next_url = links.get("_next")  # Returns None if missing or null
+        
+        if next_url:  # Only proceed if next_url is a valid non-None value
+            current_url = next_url
             # Small delay to be respectful to API
             time.sleep(0.5)
         else:
-            # No more pages
+            # No more pages (_next is None, missing, or empty)
             break
     
     return all_features
