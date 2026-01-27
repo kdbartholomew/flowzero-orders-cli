@@ -134,7 +134,10 @@ python main.py batch-submit \
 Date ranges longer than `--max-months` (default 6) are automatically split into multiple orders. For example, a 2-year date range becomes four 6-month orders.
 
 **Automatic Pagination Handling:**
-The CLI automatically handles Planet API pagination, fetching all available scenes across multiple pages. You no longer need to worry about the 250-item per-page limit - the tool will fetch all matching scenes automatically.
+The CLI automatically handles Planet API pagination, following `_links["_next"]` until all pages are fetched. This means:
+- **No 250-item limit** - The tool fetches all matching scenes across all pages automatically
+- **Works with large date ranges** - You can use 12+ month ranges without hitting pagination limits
+- **Transparent operation** - Pagination happens automatically in the background
 
 **Example Output with Quota Tracking:**
 ```
@@ -466,9 +469,10 @@ Example output:
 - However, smaller date ranges (3-6 months) are still recommended for better organization and faster processing
 
 ### Automatic Pagination
-- The CLI automatically fetches all scenes across multiple API pages
+- The CLI automatically fetches all scenes across multiple API pages by following Planet's `_links["_next"]` pagination pattern
 - No manual intervention needed - pagination is handled transparently
-- Large date ranges may take longer to process as more pages are fetched
+- Large date ranges (12+ months) work correctly and will fetch all available scenes
+- Processing time increases with more pages, but all scenes will be retrieved
 
 ### "Skipping (exists)" messages
 - Files that already exist in the output location (S3 or local) are skipped

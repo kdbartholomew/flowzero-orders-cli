@@ -76,6 +76,7 @@ def fetch_all_search_results(search_url: str, search_payload: dict, api_key: str
     """
     Fetch all search results from Planet API, handling pagination.
     
+    Follows Planet API pagination pattern: check _links["_next"] until it's gone.
     Returns a list of all features from all pages.
     """
     all_features = []
@@ -99,10 +100,9 @@ def fetch_all_search_results(search_url: str, search_payload: dict, api_key: str
         features = data.get("features", [])
         all_features.extend(features)
         
-        # Check for next page
-        links = data.get("_links", {})
-        if "next" in links:
-            current_url = links["next"]
+        # Follow pagination - Planet API uses "_next" (with underscore) in _links
+        if "_links" in data and "_next" in data["_links"]:
+            current_url = data["_links"]["_next"]
             # Small delay to be respectful to API
             time.sleep(0.5)
         else:
