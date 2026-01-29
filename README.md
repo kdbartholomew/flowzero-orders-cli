@@ -256,6 +256,17 @@ python main.py batch-check-status <batch_id> --api-key API_KEY
 - **Download-once**: Checks if files already exist in S3 or locally before downloading
 - **Local or S3 output**: Use `--output ./downloads` to save locally instead of S3
 - **Overwrite mode**: Use `--overwrite` to force re-download of all files
+- **Full order state handling**: Properly handles all Planet API order states (see below)
+
+**Planet API Order States:**
+| State | Behavior |
+|-------|----------|
+| `queued` | Order is waiting in queue - try again later |
+| `running` | Order is processing - try again later |
+| `success` | Download all files |
+| `partial` | Download available files, warn about missing ones |
+| `failed` | Log error with hints from Planet, skip order |
+| `cancelled` | Log as cancelled, skip order |
 
 **Example Usage:**
 ```bash
@@ -290,21 +301,37 @@ python main.py batch-check-status abc123-def4-5678-... --output ./downloads --ov
 
 [2/7] Checking 08279000 (2022-01-01 to 2022-06-30)...
   Order ID: b2c3d4e5-f6g7-8901-bcde-f23456789012
+  [✅] Status: partial
+  [⚠️] Order is partial - some files may have failed. Downloading available files...
+  [🔍] Processing PSScope Order - Organizing by week...
+  [✅] Found 15 images across 15 weeks
+  [⬆️] Uploading: 20220108_xyz789.tif -> s3://flowzero/...
+  ...
+  [⚠️] Partial order downloaded (some files may be missing)!
+
+[3/7] Checking 08279100 (2022-01-01 to 2022-06-30)...
+  Order ID: c3d4e5f6-g7h8-9012-cdef-g34567890123
   [✅] Status: success
   [🔍] Processing PSScope Order - Organizing by week...
   [✅] Found 19 images across 19 weeks
-  [⏭️] Skipping (exists): s3://flowzero/planetscope analytic/four_bands/08279000/2022_01_08_xyz789.tiff
+  [⏭️] Skipping (exists): s3://flowzero/planetscope analytic/four_bands/08279100/2022_01_08_abc123.tiff
   ... (all files already exist)
   [🎉] Order complete!
 
 ============================================================
 📊 Batch Status Check Summary
 ============================================================
-Completed & Uploaded: 6
-Pending (not ready): 1
-  - c3d4e5f6... (running)
+✅ Completed & Downloaded: 4
+⚠️ Partial (downloaded available files): 1
+    - 08279000 (b2c3d4e5...)
+⏳ Pending (queued/running): 1
+    - 08279200 (running)
+❌ Failed (on Planet's side): 1
+    - 08279300: Asset not available for scene
 
-💡 Run again later to check pending orders.
+💡 Run again later to check pending orders (queued/running).
+⚠️ 1 partial order(s) had some files that couldn't be processed by Planet.
+❌ 1 order(s) failed or were cancelled - these will not complete.
 ```
 
 ---

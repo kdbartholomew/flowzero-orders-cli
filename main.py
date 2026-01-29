@@ -588,7 +588,25 @@ def check_order_status(order_id, api_key):
     order_state = order_info["state"]
     console.print(f"[✅] Order Status: {order_state}")
 
-    if order_state != "success":
+    # Handle different order states (Planet API states: queued, running, success, partial, failed, cancelled)
+    if order_state == "success":
+        pass  # Proceed to download
+    elif order_state == "partial":
+        console.print(f"[yellow]⚠️ Order is partial - some files may have failed. Downloading available files...[/yellow]")
+    elif order_state == "failed":
+        error_hints = order_info.get("error_hints", [])
+        console.print(f"[red]❌ Order failed permanently.[/red]")
+        if error_hints:
+            console.print(f"[red]   Error hints: {', '.join(error_hints)}[/red]")
+        return
+    elif order_state == "cancelled":
+        console.print(f"[red]❌ Order was cancelled and will not be completed.[/red]")
+        return
+    elif order_state in ("queued", "running"):
+        console.print(f"[yellow]⏳ Order is {order_state}. Try again later.[/yellow]")
+        return
+    else:
+        console.print(f"[yellow]⏳ Unknown order state: {order_state}. Try again later.[/yellow]")
         return
 
     aoi_name = "UnknownAOI"
@@ -765,10 +783,14 @@ def batch_check_status(batch_id, api_key, overwrite, output):
     console.print(f"[bold blue]📦 Found {len(batch_orders)} orders in batch: {batch_id}[/bold blue]\n")
     
     # Process each order
+    # Track by Planet API states: queued, running, success, partial, failed, cancelled
     results = {
-        "success": [],
-        "pending": [],
-        "failed": []
+        "success": [],       # Completed successfully
+        "partial": [],       # Completed with some missing files
+        "pending": [],       # queued or running - try again later
+        "failed": [],        # Order failed permanently on Planet's side
+        "cancelled": [],     # Order was cancelled
+        "error": []          # API/processing errors on our side
     }
     
     for i, order in enumerate(batch_orders, 1):
@@ -785,19 +807,40 @@ def batch_check_status(batch_id, api_key, overwrite, output):
         
         if response.status_code != 200:
             console.print(f"  [❌] Error checking order status: {response.text[:100]}", style="bold red")
-            results["failed"].append({"order_id": order_id, "error": response.text[:100]})
+            results["error"].append({"order_id": order_id, "aoi_name": aoi_name, "error": response.text[:100]})
             continue
         
         order_info = response.json()
         order_state = order_info["state"]
         console.print(f"  [✅] Status: {order_state}")
         
-        if order_state != "success":
-            console.print(f"  [⏳] Order not ready yet (state: {order_state})[/⏳]")
-            results["pending"].append({"order_id": order_id, "state": order_state})
+        # Handle different order states (Planet API: queued, running, success, partial, failed, cancelled)
+        is_partial = False
+        if order_state == "success":
+            pass  # Proceed to download
+        elif order_state == "partial":
+            is_partial = True
+            console.print(f"  [⚠️] Order is partial - some files may have failed. Downloading available files...")
+        elif order_state == "failed":
+            error_hints = order_info.get("error_hints", [])
+            error_msg = ', '.join(error_hints) if error_hints else "No details provided"
+            console.print(f"  [❌] Order failed permanently: {error_msg}")
+            results["failed"].append({"order_id": order_id, "aoi_name": aoi_name, "error": error_msg})
+            continue
+        elif order_state == "cancelled":
+            console.print(f"  [❌] Order was cancelled and will not be completed.")
+            results["cancelled"].append({"order_id": order_id, "aoi_name": aoi_name})
+            continue
+        elif order_state in ("queued", "running"):
+            console.print(f"  [⏳] Order is {order_state} - try again later.")
+            results["pending"].append({"order_id": order_id, "aoi_name": aoi_name, "state": order_state})
+            continue
+        else:
+            console.print(f"  [⏳] Unknown state: {order_state} - try again later.")
+            results["pending"].append({"order_id": order_id, "aoi_name": aoi_name, "state": order_state})
             continue
         
-        # Order is ready - process it (reuse logic from check_order_status)
+        # Order is ready (success or partial) - process it
         aoi_name_normalized = normalize_aoi_name(order.get("aoi_name", "UnknownAOI"))
         mosaic_name = order.get("mosaic_name", "unknown_mosaic")
         order_type = order.get("order_type", "Unknown")
@@ -809,7 +852,7 @@ def batch_check_status(batch_id, api_key, overwrite, output):
         download_links = order_info["_links"].get("results", [])
         if not download_links:
             console.print("  [⚠️] No downloadable files found.")
-            results["failed"].append({"order_id": order_id, "error": "No downloadable files"})
+            results["error"].append({"order_id": order_id, "aoi_name": aoi_name, "error": "No downloadable files"})
             continue
         
         # Determine output location
@@ -962,28 +1005,58 @@ def batch_check_status(batch_id, api_key, overwrite, output):
                     f.write(metadata_json)
                 console.print(f"  [✅] Metadata saved locally")
             
-            console.print(f"  [🎉] Order complete!\n")
-            results["success"].append(order)
+            if is_partial:
+                console.print(f"  [⚠️] Partial order downloaded (some files may be missing)!\n")
+                results["partial"].append(order)
+            else:
+                console.print(f"  [🎉] Order complete!\n")
+                results["success"].append(order)
         except Exception as e:
             console.print(f"  [❌] Error processing order: {str(e)}", style="bold red")
-            results["failed"].append({"order_id": order_id, "error": str(e)})
+            results["error"].append({"order_id": order_id, "aoi_name": aoi_name, "error": str(e)})
     
     # Summary
     console.print("\n" + "="*60)
     console.print("[bold]📊 Batch Status Check Summary[/bold]")
     console.print("="*60)
-    console.print(f"[green]Completed & Uploaded: {len(results['success'])}[/green]")
+    console.print(f"[green]✅ Completed & Downloaded: {len(results['success'])}[/green]")
+    if results["partial"]:
+        console.print(f"[yellow]⚠️ Partial (downloaded available files): {len(results['partial'])}[/yellow]")
+        for order in results["partial"]:
+            aoi = order.get("aoi_name", "Unknown")
+            oid = order.get("order_id", "unknown")[:8]
+            console.print(f"    - {aoi} ({oid}...)")
     if results["pending"]:
-        console.print(f"[yellow]Pending (not ready): {len(results['pending'])}[/yellow]")
+        console.print(f"[yellow]⏳ Pending (queued/running): {len(results['pending'])}[/yellow]")
         for item in results["pending"]:
-            console.print(f"  - {item['order_id'][:8]}... ({item.get('state', 'unknown')})")
+            aoi = item.get("aoi_name", "Unknown")
+            state = item.get("state", "unknown")
+            console.print(f"    - {aoi} ({state})")
     if results["failed"]:
-        console.print(f"[red]Failed: {len(results['failed'])}[/red]")
+        console.print(f"[red]❌ Failed (on Planet's side): {len(results['failed'])}[/red]")
         for item in results["failed"]:
-            console.print(f"  - {item.get('order_id', 'unknown')[:8]}...: {item.get('error', 'Unknown')[:50]}")
+            aoi = item.get("aoi_name", "Unknown")
+            error = item.get("error", "No details")[:50]
+            console.print(f"    - {aoi}: {error}")
+    if results["cancelled"]:
+        console.print(f"[red]🚫 Cancelled: {len(results['cancelled'])}[/red]")
+        for item in results["cancelled"]:
+            aoi = item.get("aoi_name", "Unknown")
+            console.print(f"    - {aoi}")
+    if results["error"]:
+        console.print(f"[red]💥 Processing errors: {len(results['error'])}[/red]")
+        for item in results["error"]:
+            aoi = item.get("aoi_name", "Unknown")
+            error = item.get("error", "Unknown")[:50]
+            console.print(f"    - {aoi}: {error}")
     
+    # Helpful tips
     if results["pending"]:
-        console.print(f"\n[yellow]💡 Run again later to check pending orders.[/yellow]")
+        console.print(f"\n[yellow]💡 Run again later to check pending orders (queued/running).[/yellow]")
+    if results["partial"]:
+        console.print(f"[yellow]⚠️ {len(results['partial'])} partial order(s) had some files that couldn't be processed by Planet.[/yellow]")
+    if results["failed"] or results["cancelled"]:
+        console.print(f"[red]❌ {len(results['failed']) + len(results['cancelled'])} order(s) failed or were cancelled - these will not complete.[/red]")
 
 
 @cli.command()
